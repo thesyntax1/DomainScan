@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, grade_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
+from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, grade_check, helpers, history_check, history_store, http_check, i18n, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -2657,3 +2657,91 @@ class DeeperDataTests(unittest.TestCase):
         rows = whois_check.parse_rdap(data)
         found = rows_to_dict(rows)
         self.assertIn("Abuse contact", found)
+
+
+class LanguageTests(unittest.TestCase):
+    def test_language_list(self):
+        codes = [code for code, _ in i18n.LANGUAGES]
+        self.assertEqual(codes, ["en", "tr", "es", "de"])
+        self.assertEqual(i18n.valid_codes(), codes)
+
+    def test_string_keys_complete(self):
+        base = set(i18n.STRINGS["en"])
+        self.assertGreater(len(base), 50)
+        for code in ("tr", "es", "de"):
+            self.assertEqual(set(i18n.STRINGS[code]), base)
+
+    def test_section_names_complete(self):
+        base = set(i18n.SECTION_NAMES["en"])
+        self.assertIn("Summary", base)
+        self.assertIn("Changes", base)
+        for code in ("tr", "es", "de"):
+            self.assertEqual(set(i18n.SECTION_NAMES[code]), base)
+
+    def test_placeholders_match(self):
+        import string
+        fmt = string.Formatter()
+        for key, en_text in i18n.STRINGS["en"].items():
+            en_fields = {field[1] for field in fmt.parse(en_text) if field[1]}
+            for code in ("tr", "es", "de"):
+                other = {field[1] for field in fmt.parse(i18n.STRINGS[code][key]) if field[1]}
+                self.assertEqual(other, en_fields)
+
+    def test_get_fallback(self):
+        self.assertEqual(i18n.get("xx", "scan"), i18n.STRINGS["en"]["scan"])
+        self.assertEqual(i18n.get("tr", "no_such_key"), "no_such_key")
+        self.assertEqual(i18n.section("tr", "No Such Section"), "No Such Section")
+        self.assertEqual(i18n.section("xx", "DNS"), "DNS")
+
+    def test_get_formats(self):
+        self.assertIn("3", i18n.get("tr", "findings", n=3))
+        self.assertIn("example.com", i18n.get("de", "scanning", target="example.com"))
+
+    def test_language_persistence(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            self.assertEqual(i18n.load_language(tmp), "en")
+            i18n.save_language("tr", tmp)
+            self.assertEqual(i18n.load_language(tmp), "tr")
+            with open(os.path.join(tmp, "language"), "w", encoding="utf-8") as handle:
+                handle.write("xx")
+            self.assertEqual(i18n.load_language(tmp), "en")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class ZAppLanguageTest(unittest.TestCase):
+    def test_refresh_language_with_mocked_gui(self):
+        from unittest import mock
+        fake_tkinter = mock.MagicMock()
+        sys.modules["tkinter"] = fake_tkinter
+        sys.modules.pop("domainscan.app", None)
+        try:
+            from domainscan import app as app_module
+            root = mock.MagicMock()
+            app = app_module.DomainScanApp(root)
+            app.tree.get_children.return_value = []
+            app.search_entry.get.return_value = ""
+            app.section_box.get.return_value = "All sections"
+            app.section_box.cget.return_value = ["All sections"]
+            with mock.patch.object(app_module.i18n, "save_language", return_value="tr"):
+                app.lang_box.get.return_value = "🇹🇷 Türkçe"
+                app.on_language()
+            self.assertEqual(app.lang, "tr")
+            texts = [str(call[1].get("text", "")) for call in app.scan_button.configure.call_args_list]
+            self.assertIn("Tara", texts)
+            self.assertEqual(app.current_section_key(), "*all*")
+            app.all_rows = [("DNS", "A", "1.2.3.4")]
+            app.result = {"meta": {"duration_seconds": 2.0}, "target": {"host": "example.com"}, "sections": {"DNS": [("A", "1.2.3.4")]}}
+            app.section_choices(["DNS"])
+            app.section_box.cget.return_value = ["Tüm bölümler", "DNS"]
+            app.section_box.get.return_value = "DNS"
+            self.assertEqual(app.current_section_key(), "DNS")
+            app.apply_filter()
+            app.lang = "en"
+            app.refresh_language()
+            texts = [str(call[1].get("text", "")) for call in app.scan_button.configure.call_args_list]
+            self.assertIn("Scan", texts)
+        finally:
+            sys.modules.pop("tkinter", None)
+            sys.modules.pop("domainscan.app", None)

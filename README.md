@@ -60,7 +60,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Type a domain or URL (for example `example.com`) and press Scan. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens Scan History (load or compare earlier scans) and Watch Target (rescan periodically and report changes).
+Type a domain or URL (for example `example.com`) and press Scan. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens Scan History (load or compare earlier scans) and Watch Target (rescan periodically and report changes). The interface language can be switched from the header (🇬🇧 English, 🇹🇷 Türkçe, 🇪🇸 Español, 🇩🇪 Deutsch); menus, buttons, dialogs and section names follow immediately and the choice is remembered. Finding details stay in English as technical labels.
 
 ## Command line
 
