@@ -10,6 +10,7 @@ except Exception:
 
 HOST_TYPES = ["A", "AAAA", "CNAME"]
 DOMAIN_TYPES = ["MX", "NS", "TXT", "SOA", "CAA"]
+EXTRA_HOST_TYPES = ["HTTPS", "SVCB", "SSHFP", "NAPTR", "LOC"]
 
 
 def make_resolver():
@@ -71,6 +72,116 @@ def query_type(resolver, name, rtype, rows, tag):
     return cleaned
 
 
+def parse_soa(records):
+    rows = []
+    if not records:
+        return rows
+    parts = records[0].split()
+    if len(parts) < 7:
+        rows.append(("SOA details", records[0]))
+        return rows
+    rows.append(("SOA primary NS", parts[0]))
+    rows.append(("SOA contact", parts[1].rstrip(".").replace(".", "@", 1)))
+    rows.append(("SOA serial", parts[2]))
+    rows.append(("SOA refresh", parts[3] + " seconds"))
+    rows.append(("SOA retry", parts[4] + " seconds"))
+    rows.append(("SOA expire", parts[5] + " seconds"))
+    rows.append(("SOA minimum TTL", parts[6] + " seconds"))
+    return rows
+
+
+def parse_caa(records):
+    rows = []
+    if not records:
+        rows.append(("CAA policy", "No CAA records (any CA may issue)"))
+        return rows
+    count = 0
+    for record in records:
+        parts = record.split(None, 2)
+        if len(parts) < 3:
+            continue
+        count += 1
+        tag = parts[1].lower()
+        value = parts[2].strip().strip('"')
+        rows.append(("CAA policy " + str(count), tag + " " + value + " (flags " + parts[0] + ")"))
+    if count:
+        rows.append(("CAA restricts issuance", "Yes (" + str(count) + " policies)"))
+    return rows
+
+
+def compare_resolvers(host, system_a):
+    rows = []
+    system_set = set(system_a or [])
+    for ip in ("1.1.1.1", "8.8.8.8"):
+        try:
+            custom = dns.resolver.Resolver(configure=False)
+            custom.nameservers = [ip]
+            custom.timeout = 3.0
+            custom.lifetime = 6.0
+            result = query(custom, host, "A")
+            addresses = result["records"]
+        except Exception:
+            addresses = []
+        if addresses:
+            rows.append(("A via " + ip, ", ".join(sorted(addresses))))
+        else:
+            rows.append(("A via " + ip, "No answer"))
+    others = []
+    for key, value in rows:
+        if value != "No answer":
+            others.append(set(value.split(", ")))
+    if not system_set:
+        rows.append(("Resolver agreement", "No system answer to compare"))
+    elif others and all(item == system_set for item in others):
+        rows.append(("Resolver agreement", "All resolvers agree"))
+    elif others:
+        rows.append(("Resolver agreement", "Resolvers disagree (CDN or geo-DNS likely)"))
+    else:
+        rows.append(("Resolver agreement", "Public resolvers unreachable"))
+    return rows
+
+
+def axfr_status(ns_ip, apex):
+    try:
+        import dns.query
+        generator = dns.query.xfr(ns_ip, apex, timeout=5)
+        count = 0
+        for message in generator:
+            count += 1
+            if count > 50:
+                break
+        if count >= 50:
+            return "Allowed (large zone, truncated)"
+        if count:
+            return "Allowed (" + str(count) + " messages)"
+        return "Empty response"
+    except Exception:
+        return "Refused or failed"
+
+
+def check_axfr(resolver, nameservers, apex):
+    rows = []
+    if not nameservers:
+        rows.append(("Zone transfer", "No nameservers found"))
+        return rows
+    tried = 0
+    for ns in nameservers[:3]:
+        target = ns.rstrip(".")
+        try:
+            result = query(resolver, target, "A")
+            addresses = result["records"]
+        except Exception:
+            addresses = []
+        if not addresses:
+            rows.append(("AXFR " + target, "Nameserver has no A record"))
+            continue
+        tried += 1
+        rows.append(("AXFR " + target, axfr_status(addresses[0], apex)))
+    if not tried:
+        rows.append(("Zone transfer", "Could not reach any nameserver"))
+    return rows
+
+
 def collect(host, apex):
     rows = []
     data = {
@@ -106,6 +217,21 @@ def collect(host, apex):
         data["dnskey"] = query_type(resolver, host, "DNSKEY", rows, "")
     for service in ("_https._tcp", "_http._tcp"):
         query_type(resolver, service + "." + host, "SRV", rows, " (" + service + ")")
+    for rtype in EXTRA_HOST_TYPES:
+        query_type(resolver, host, rtype, rows, "")
+    query_type(resolver, "_443._tcp." + host, "TLSA", rows, " (_443._tcp)")
+    if apex and apex != host:
+        query_type(resolver, apex, "NSEC3PARAM", rows, " (apex)")
+    else:
+        query_type(resolver, host, "NSEC3PARAM", rows, "")
+    rows.extend(parse_soa(data["soa_apex"] or data["soa"]))
+    rows.extend(parse_caa(data["caa_apex"] or data["caa"]))
+    rows.extend(compare_resolvers(host, data["a"]))
+    if apex:
+        zone = apex
+    else:
+        zone = host
+    rows.extend(check_axfr(resolver, data["ns_apex"] or data["ns"], zone))
     if data["ds"] or data["dnskey"]:
         rows.append(("DNSSEC", "Signed (DS/DNSKEY records published)"))
     else:

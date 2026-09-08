@@ -182,3 +182,47 @@ def export_txt(path, result):
             for key, value in items:
                 handle.write(key + ": " + value + "\n")
             handle.write("\n")
+
+
+def murmur3_32(data, seed=0):
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    length = len(data)
+    value = seed & 0xFFFFFFFF
+    blocks = length // 4
+    for i in range(blocks):
+        key = data[i * 4] | (data[i * 4 + 1] << 8) | (data[i * 4 + 2] << 16) | (data[i * 4 + 3] << 24)
+        key = (key * 0xCC9E2D51) & 0xFFFFFFFF
+        key = ((key << 15) | (key >> 17)) & 0xFFFFFFFF
+        key = (key * 0x1B873593) & 0xFFFFFFFF
+        value ^= key
+        value = ((value << 13) | (value >> 19)) & 0xFFFFFFFF
+        value = (value * 5 + 0xE6546B64) & 0xFFFFFFFF
+    tail = data[blocks * 4:]
+    key = 0
+    if len(tail) >= 3:
+        key ^= tail[2] << 16
+    if len(tail) >= 2:
+        key ^= tail[1] << 8
+    if len(tail) >= 1:
+        key ^= tail[0]
+        key = (key * 0xCC9E2D51) & 0xFFFFFFFF
+        key = ((key << 15) | (key >> 17)) & 0xFFFFFFFF
+        key = (key * 0x1B873593) & 0xFFFFFFFF
+        value ^= key
+    value ^= length
+    value ^= value >> 16
+    value = (value * 0x85EBCA6B) & 0xFFFFFFFF
+    value ^= value >> 13
+    value = (value * 0xC2B2AE35) & 0xFFFFFFFF
+    value ^= value >> 16
+    return value
+
+
+def favicon_hash(raw):
+    import base64
+    encoded = base64.encodebytes(raw or b"")
+    digest = murmur3_32(encoded)
+    if digest >= 0x80000000:
+        digest -= 0x100000000
+    return digest

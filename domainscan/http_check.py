@@ -2,6 +2,7 @@ import re
 import socket
 import ssl
 import time
+import warnings
 import hashlib
 import datetime
 
@@ -59,6 +60,9 @@ def collect_http(fetch_url, timeout=12):
     for index, hop in enumerate(history, 1):
         target = hop.headers.get("Location", "")
         rows.append(("Redirect " + str(index), str(hop.status_code) + " " + (hop.reason or "") + " -> " + short(target, 200)))
+        server = hop.headers.get("Server", "")
+        if server:
+            rows.append(("Redirect " + str(index) + " server", short(server, 120)))
     if fetch_url.startswith("http://") and response.url.startswith("https://"):
         rows.append(("HTTPS upgrade", "Yes, plain HTTP redirects to HTTPS"))
     rows.append(("HTTP status", str(response.status_code) + " " + (response.reason or "")))
@@ -87,6 +91,11 @@ def collect_http(fetch_url, timeout=12):
         if not detail:
             detail = "(empty)"
         rows.append(("Cookie: " + cookie["name"], detail))
+    try:
+        raw_cookies = response.raw.headers.getlist("Set-Cookie")
+    except Exception:
+        raw_cookies = []
+    rows.extend(cookie_flag_rows(raw_cookies))
     rows.extend(security_summary(response.headers))
     html = response.text or ""
     if len(html) > MAX_HTML:
@@ -94,6 +103,56 @@ def collect_http(fetch_url, timeout=12):
         html = html[:MAX_HTML]
     result["html"] = html
     return result
+
+
+def parse_set_cookie(header):
+    info = {"name": "", "secure": False, "httponly": False, "samesite": ""}
+    parts = (header or "").split(";")
+    if parts:
+        info["name"] = parts[0].split("=", 1)[0].strip()
+    for part in parts[1:]:
+        attr = part.strip()
+        low = attr.lower()
+        if low == "secure":
+            info["secure"] = True
+        elif low == "httponly":
+            info["httponly"] = True
+        elif low.startswith("samesite"):
+            if "=" in attr:
+                info["samesite"] = attr.split("=", 1)[1].strip()
+            else:
+                info["samesite"] = "set"
+    return info
+
+
+def cookie_flag_rows(raw_cookies):
+    rows = []
+    if not raw_cookies:
+        return rows
+    insecure = 0
+    script_readable = 0
+    for header in raw_cookies:
+        info = parse_set_cookie(header)
+        flags = []
+        if info["secure"]:
+            flags.append("Secure")
+        else:
+            flags.append("no Secure")
+            insecure += 1
+        if info["httponly"]:
+            flags.append("HttpOnly")
+        else:
+            flags.append("no HttpOnly")
+            script_readable += 1
+        if info["samesite"]:
+            flags.append("SameSite=" + info["samesite"])
+        else:
+            flags.append("no SameSite")
+        name = info["name"] or "cookie"
+        rows.append(("Cookie flags: " + name, ", ".join(flags)))
+    rows.append(("Cookies missing Secure", str(insecure)))
+    rows.append(("Cookies missing HttpOnly", str(script_readable)))
+    return rows
 
 
 def security_summary(headers):
@@ -159,7 +218,7 @@ def collect_tls(host, port=443):
         return {"rows": rows}
     rows.append(("TLS reachable", "Yes, port " + str(port) + " open"))
     try:
-        cert, der, cipher, version = fetch_cert(host, port)
+        cert, der, cipher, version, alpn = fetch_cert(host, port)
     except Exception as exc:
         rows.append(("Certificate status", "Could not retrieve certificate (" + exc.__class__.__name__ + ")"))
         return {"rows": rows}
@@ -169,12 +228,67 @@ def collect_tls(host, port=443):
         rows.append(("Cipher suite", str(cipher[0])))
         rows.append(("Cipher protocol", str(cipher[1])))
         rows.append(("Cipher bits", str(cipher[2])))
+    if alpn:
+        rows.append(("ALPN protocol", alpn))
+    else:
+        rows.append(("ALPN protocol", "None negotiated"))
+    if alpn == "h2":
+        rows.append(("HTTP/2", "Supported (h2 negotiated)"))
+    else:
+        rows.append(("HTTP/2", "Not negotiated"))
+    rows.extend(version_probe_rows(host, port))
     if trusted:
         rows.append(("Chain trusted", "Yes (system certificate store)"))
     else:
         rows.append(("Chain trusted", "No: " + short(trust_error, 200)))
     rows.extend(parse_cert(cert, der, host))
     return {"rows": rows}
+
+
+def probe_tls_version(host, port, minimum, maximum):
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        context.minimum_version = minimum
+        context.maximum_version = maximum
+    raw = socket.create_connection((host, port), timeout=6)
+    try:
+        sock = context.wrap_socket(raw, server_hostname=host)
+    except Exception:
+        try:
+            raw.close()
+        except Exception:
+            pass
+        return False, ""
+    try:
+        version = sock.version() or ""
+        sock.close()
+    except Exception:
+        return False, ""
+    return True, version
+
+
+def version_probe_rows(host, port):
+    rows = []
+    try:
+        legacy_ok, legacy_version = probe_tls_version(host, port, ssl.TLSVersion.TLSv1, ssl.TLSVersion.TLSv1_1)
+    except Exception:
+        legacy_ok, legacy_version = False, ""
+    if legacy_ok:
+        rows.append(("Legacy TLS", "TLS 1.0/1.1 accepted (" + legacy_version + ", weak)"))
+    else:
+        rows.append(("Legacy TLS", "TLS 1.0/1.1 not accepted"))
+    try:
+        modern_ok, modern_version = probe_tls_version(host, port, ssl.TLSVersion.TLSv1_3, ssl.TLSVersion.TLSv1_3)
+    except Exception:
+        modern_ok, modern_version = False, ""
+    if modern_ok:
+        rows.append(("TLS 1.3", "Supported (" + modern_version + ")"))
+    else:
+        rows.append(("TLS 1.3", "Not supported"))
+    return rows
 
 
 def verify_handshake(host, port):
@@ -205,6 +319,10 @@ def fetch_cert(host, port):
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
+    try:
+        context.set_alpn_protocols(["h2", "http/1.1"])
+    except Exception:
+        pass
     raw = socket.create_connection((host, port), timeout=8)
     sock = context.wrap_socket(raw, server_hostname=host)
     try:
@@ -212,12 +330,16 @@ def fetch_cert(host, port):
         der = sock.getpeercert(binary_form=True)
         cipher = sock.cipher()
         version = sock.version()
+        try:
+            alpn = sock.selected_alpn_protocol()
+        except Exception:
+            alpn = ""
     finally:
         try:
             sock.close()
         except Exception:
             pass
-    return cert, der, cipher, version
+    return cert, der, cipher, version, alpn or ""
 
 
 def cert_names(entry):

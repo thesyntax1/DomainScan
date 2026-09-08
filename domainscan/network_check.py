@@ -1,4 +1,7 @@
+import platform
+import re
 import socket
+import subprocess
 
 from domainscan.helpers import BROWSER_UA
 
@@ -6,7 +9,7 @@ from domainscan.helpers import BROWSER_UA
 IPAPI_FIELDS = "status,message,continent,continentCode,country,countryCode,region,regionName,city,district,zip,lat,lon,timezone,offset,currency,isp,org,as,asname,reverse,mobile,proxy,hosting,query"
 
 
-def collect(ips):
+def collect(ips, host=""):
     rows = []
     unique = []
     for ip in ips or []:
@@ -14,14 +17,38 @@ def collect(ips):
             unique.append(ip)
     if not unique:
         rows.append(("IP addresses", "None resolved"))
+        if host:
+            rows.append(("ICMP ping", ping(host)))
         return {"rows": rows}
     rows.append(("IP address count", str(len(unique))))
+    if host:
+        rows.append(("ICMP ping", ping(host)))
     shown = unique[:6]
     if len(unique) > 6:
         rows.append(("IP note", "Showing first 6 of " + str(len(unique))))
     for index, ip in enumerate(shown, 1):
         rows.extend(describe_ip(ip, index))
     return {"rows": rows}
+
+
+def ping(host):
+    if platform.system().lower() == "windows":
+        command = ["ping", "-n", "1", "-w", "2000", host]
+    else:
+        command = ["ping", "-c", "1", "-W", "2", host]
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=8)
+    except FileNotFoundError:
+        return "ping tool not available"
+    except Exception:
+        return "Ping failed"
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        return "No reply (filtered or offline)"
+    match = re.search(r"time[=<]\s*([\d.]+)\s*ms", output, re.IGNORECASE)
+    if match:
+        return "Reply in " + match.group(1) + " ms"
+    return "Reply received"
 
 
 def reverse_dns(ip):

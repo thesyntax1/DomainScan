@@ -7,7 +7,11 @@ from domainscan import dns_check
 from domainscan.helpers import short
 
 
-DKIM_SELECTORS = ["default", "google", "selector1", "selector2", "k1", "mail", "dkim", "everly"]
+DKIM_SELECTORS = [
+    "default", "google", "selector1", "selector2", "k1", "k2", "mail",
+    "dkim", "dkim1", "everly", "s1", "s2", "cm", "mandrill",
+    "protonmail", "zoho",
+]
 
 
 def collect(host, apex, dns_data):
@@ -26,6 +30,8 @@ def collect(host, apex, dns_data):
         rows.extend(describe_dmarc(resolver, name))
         rows.extend(describe_dkim(resolver, name))
         rows.extend(describe_bimi_mtasts(resolver, name))
+        rows.extend(describe_tlsrpt(resolver, name))
+        rows.extend(describe_autoconfig(resolver, name))
     else:
         rows.append(("DMARC/DKIM", "Skipped (dnspython not installed)"))
     return {"rows": rows}
@@ -53,13 +59,25 @@ def describe_mx(records):
             rows.append(("MX " + str(index), "Preference " + preference + ", " + target))
         else:
             rows.append(("MX " + str(index), target))
+        addresses = []
         try:
-            resolved = socket.gethostbyname_ex(target)[2]
-            rows.append(("MX " + str(index) + " addresses", ", ".join(resolved[:4])))
+            addresses = socket.gethostbyname_ex(target)[2]
+            rows.append(("MX " + str(index) + " addresses", ", ".join(addresses[:4])))
         except Exception:
             rows.append(("MX " + str(index) + " addresses", "Does not resolve"))
+        if addresses:
+            rows.append(("MX " + str(index) + " PTR", mx_ptr(addresses[0])))
         rows.append(("MX " + str(index) + " SMTP", smtp_probe(target)))
+        rows.append(("MX " + str(index) + " STARTTLS", smtp_starttls(target)))
     return rows
+
+
+def mx_ptr(ip):
+    try:
+        name, _, _ = socket.gethostbyaddr(ip)
+        return name
+    except Exception:
+        return "No PTR record"
 
 
 def smtp_probe(target):
@@ -87,6 +105,50 @@ def smtp_probe(target):
     return "Reachable (" + str(elapsed) + " ms)"
 
 
+def read_smtp(sock, timeout=6):
+    sock.settimeout(timeout)
+    chunks = b""
+    try:
+        while len(chunks) < 4096:
+            data = sock.recv(1024)
+            if not data:
+                break
+            chunks += data
+            lines = chunks.decode("utf-8", "ignore").splitlines()
+            if lines and re.match(r"^\d{3} ", lines[-1]):
+                break
+    except Exception:
+        pass
+    return chunks.decode("utf-8", "ignore")
+
+
+def smtp_starttls(target, port=25):
+    try:
+        sock = socket.create_connection((target, port), timeout=6)
+    except Exception:
+        return "Unreachable"
+    try:
+        banner = read_smtp(sock)
+        if not banner.startswith("220"):
+            return "Unexpected banner"
+        sock.sendall(b"EHLO domainscan\r\n")
+        greeting = read_smtp(sock)
+        try:
+            sock.sendall(b"QUIT\r\n")
+        except Exception:
+            pass
+        if "starttls" in greeting.lower():
+            return "Offered"
+        return "Not offered"
+    except Exception:
+        return "Check failed"
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
 def describe_spf(txt_records):
     rows = []
     spf = [item for item in txt_records if item.lower().startswith("v=spf1")]
@@ -102,6 +164,10 @@ def describe_spf(txt_records):
     rows.append(("SPF mechanism count", str(len(tokens))))
     for index, token in enumerate(tokens, 1):
         rows.append(("SPF mechanism " + str(index), short(token, 160) + " (" + spf_meaning(token) + ")"))
+    lookups = spf_lookups(tokens)
+    rows.append(("SPF DNS lookups", str(lookups) + " of max 10"))
+    if lookups > 10:
+        rows.append(("SPF lookup limit", "Exceeded (receivers return permerror)"))
     policy = "No default policy"
     for token in tokens:
         if token.lower().endswith("all"):
@@ -113,6 +179,21 @@ def describe_spf(txt_records):
             policy = meaning + " [" + token + "]"
     rows.append(("SPF default policy", policy))
     return rows
+
+
+def spf_lookups(tokens):
+    count = 0
+    for token in tokens:
+        if token[:1] in "+-~?":
+            body = token[1:]
+        else:
+            body = token
+        low = body.lower()
+        if low.startswith(("include:", "redirect=", "exists:")):
+            count += 1
+        elif low in ("a", "mx", "ptr") or low.startswith(("a:", "a/", "mx:", "mx/", "ptr:")):
+            count += 1
+    return count
 
 
 def spf_meaning(token):
@@ -244,4 +325,34 @@ def describe_bimi_mtasts(resolver, name):
             rows.append(("MTA-STS", "No MTA-STS DNS record"))
     except Exception:
         rows.append(("MTA-STS", "Lookup failed"))
+    return rows
+
+
+def describe_tlsrpt(resolver, name):
+    rows = []
+    try:
+        result = dns_check.query(resolver, "_smtp._tls." + name, "TXT")
+        records = [dns_check.clean_txt(item) for item in result["records"]]
+    except Exception:
+        rows.append(("TLS-RPT", "Lookup failed"))
+        return rows
+    if records:
+        rows.append(("TLS-RPT", short(records[0], 220)))
+    else:
+        rows.append(("TLS-RPT", "No TLS-RPT record"))
+    return rows
+
+
+def describe_autoconfig(resolver, name):
+    rows = []
+    for prefix in ("autodiscover", "autoconfig"):
+        try:
+            result = dns_check.query(resolver, prefix + "." + name, "A")
+            records = result["records"]
+        except Exception:
+            records = []
+        if records:
+            rows.append((prefix + "." + name, ", ".join(records)))
+        else:
+            rows.append((prefix + "." + name, "No A record"))
     return rows

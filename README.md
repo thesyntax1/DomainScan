@@ -5,18 +5,24 @@ DomainScan is a desktop tool that collects publicly available information about 
 ## What it collects
 
 - Target breakdown (normalized URL, registrable domain, subdomain, suffix)
-- DNS records (A, AAAA, CNAME, MX, NS, TXT, SOA, CAA, DS, DNSKEY, SRV)
-- WHOIS / RDAP (registrar, dates, statuses, contacts, nameservers)
-- IP and network (reverse DNS, ASN, ISP, geolocation)
-- Website (redirects, headers, cookies, security headers, timing)
-- TLS certificate (issuer, validity, SANs, fingerprints, trust)
-- Mail authentication (SPF, DMARC, DKIM, BIMI, MTA-STS, MX reachability)
-- Page content (title, meta tags, links, images, scripts, forms, contacts)
-- Technologies (server, CMS, JS libraries, analytics, CDN markers)
-- Site files (robots.txt, sitemap.xml, security.txt, ads.txt, favicon, manifest)
+- DNS records (A, AAAA, CNAME, MX, NS, TXT, SOA, CAA, DS, DNSKEY, SRV, HTTPS, SVCB, TLSA, SSHFP, NAPTR)
+- DNS extras (SOA/CAA parsing, multi-resolver comparison, zone transfer test)
+- Subdomain discovery (certificate transparency, passive DNS, DNS brute-force, wildcard detection, takeover review)
+- WHOIS / RDAP (registrar, dates, domain age, statuses, contacts, nameservers)
+- IP and network (ping, reverse DNS, ASN, ISP, geolocation)
+- BGP routing (prefix, origin ASN, announced prefixes, peers)
+- Reputation (IPv4 blocklist checks across major DNSBLs)
+- Website (redirects, headers, cookies with flag analysis, security headers, timing)
+- Extra web checks (HTTP methods, TRACE, Alt-Svc, HSTS preload, IPv6, 404 handling, sensitive paths)
+- TLS certificate (issuer, validity, SANs, fingerprints, trust, ALPN/HTTP2, legacy and TLS 1.3 probes)
+- Mail authentication (SPF with lookup count, DMARC, DKIM, BIMI, MTA-STS, TLS-RPT, MX reachability, STARTTLS)
+- Page content (title, meta tags, links, images, scripts, forms, mixed content, JS paths, HTML comments, SEO basics, contacts)
+- Technologies (server, hosting, CMS, JS libraries, analytics, ads, chat, payment, CDN markers)
+- Site files (robots.txt, sitemap.xml, security.txt, ads.txt, favicon with hash, manifest)
+- Web history (first and latest archive captures, active years)
 - Common TCP ports (connect check with banners where offered)
 
-A typical scan returns a few hundred findings. Anything that cannot be resolved is reported as missing, never guessed.
+A typical scan returns several hundred findings. Anything that cannot be resolved is reported as missing, never guessed.
 
 ## Requirements
 

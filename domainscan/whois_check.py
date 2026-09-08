@@ -1,3 +1,4 @@
+import datetime
 import re
 import socket
 
@@ -29,6 +30,62 @@ def collect(domain, host):
     return {"rows": rows}
 
 
+def parse_date_flexible(text):
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    try:
+        candidate = cleaned
+        if "T" in candidate and candidate[-1:] in ("Z", "z"):
+            candidate = candidate[:-1] + "+00:00"
+        return datetime.datetime.fromisoformat(candidate)
+    except Exception:
+        pass
+    candidate = re.sub(r"\s+", " ", cleaned)
+    patterns = [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d-%b-%Y",
+        "%d-%b-%Y %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S %Z",
+        "%Y.%m.%d",
+        "%Y/%m/%d",
+        "%b %d %Y",
+        "%d %b %Y",
+    ]
+    for pattern in patterns:
+        try:
+            return datetime.datetime.strptime(candidate, pattern)
+        except Exception:
+            continue
+    return None
+
+
+def age_rows(created_text, expires_text):
+    rows = []
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    created = parse_date_flexible(created_text)
+    expires = parse_date_flexible(expires_text)
+    if created:
+        if created.tzinfo:
+            created = created.replace(tzinfo=None)
+        days = (now - created).days
+        rows.append(("Domain age", str(days) + " days (" + str(round(days / 365.25, 1)) + " years)"))
+    if expires:
+        if expires.tzinfo:
+            expires = expires.replace(tzinfo=None)
+        left = (expires - now).days
+        if left < 0:
+            rows.append(("Domain expiry", "Expired " + str(abs(left)) + " days ago"))
+        else:
+            rows.append(("Domain expiry", "Expires in " + str(left) + " days"))
+            if left < 30:
+                rows.append(("Expiry urgency", "Expiring soon"))
+    return rows
+
+
 def fetch_rdap(domain):
     import requests
     url = "https://rdap.org/domain/" + domain
@@ -57,11 +114,18 @@ def parse_rdap(data):
             rows.append(("Status " + str(index), short(status, 160)))
     else:
         rows.append(("Status", "None listed"))
+    created = ""
+    expires = ""
     for event in data.get("events", []) or []:
         action = event.get("eventAction", "")
         date = event.get("eventDate", "")
         if action or date:
             rows.append(("Date " + short(action or "event", 40), short(date, 60)))
+        if action == "registration":
+            created = date
+        elif action == "expiration":
+            expires = date
+    rows.extend(age_rows(created, expires))
     nameservers = data.get("nameservers", []) or []
     if nameservers:
         rows.append(("Nameserver count", str(len(nameservers))))
@@ -237,10 +301,13 @@ def parse_whois_text(text):
         ("Abuse phone", [r"^\s*registrar abuse contact phone:\s*(.+)$", r"^\s*abuse phone:\s*(.+)$"]),
         ("DNSSEC", [r"^\s*dnssec:\s*(.+)$"]),
     ]
+    values = {}
     for label, patterns in fields:
         value = first_match(text, patterns)
         if value:
+            values[label] = value
             rows.append((label, short(value, 180)))
+    rows.extend(age_rows(values.get("Creation date", ""), values.get("Expiry date", "")))
     statuses = all_matches(text, [r"^\s*domain status:\s*(.+)$", r"^\s*status:\s*(.+)$"])
     if statuses:
         rows.append(("Status count", str(len(statuses))))
@@ -251,7 +318,6 @@ def parse_whois_text(text):
         rows.append(("Nameserver count", str(len(nameservers))))
         for index, server in enumerate(nameservers, 1):
             rows.append(("Nameserver " + str(index), short(server, 160)))
-    org = first_match(text, [r"^\s*registrant (organization|org):\s*(.+)$"])
-    if not org and "redacted" in text.lower():
+    if not values.get("Registrant org", "") and "redacted" in text.lower():
         rows.append(("Registrant contact", "Redacted for privacy"))
     return rows

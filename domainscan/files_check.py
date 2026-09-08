@@ -1,7 +1,8 @@
 import re
 import json
+import hashlib
 
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, favicon_hash, short
 
 
 def collect(base_url, timeout=10):
@@ -24,6 +25,8 @@ def collect(base_url, timeout=10):
         if favicon["content_type"]:
             detail = detail + ", " + favicon["content_type"]
         rows.append(("Favicon", detail + ")"))
+        rows.append(("Favicon hash", str(favicon_hash(favicon["raw"])) + " (Shodan-compatible)"))
+        rows.append(("Favicon MD5", hashlib.md5(favicon["raw"]).hexdigest()))
     else:
         rows.append(("Favicon", describe_missing(favicon)))
     rows.extend(find_manifest(session, base_url, timeout))
@@ -34,7 +37,7 @@ def fetch(session, url, timeout, text=True):
     try:
         response = session.get(url, timeout=timeout)
     except Exception as exc:
-        return {"ok": False, "status": 0, "text": "", "size": 0, "content_type": "", "error": exc.__class__.__name__}
+        return {"ok": False, "status": 0, "text": "", "size": 0, "content_type": "", "error": exc.__class__.__name__, "raw": b""}
     body = response.content or b""
     content = ""
     if text:
@@ -49,6 +52,7 @@ def fetch(session, url, timeout, text=True):
         "size": len(body),
         "content_type": response.headers.get("Content-Type", ""),
         "error": "",
+        "raw": body,
     }
 
 

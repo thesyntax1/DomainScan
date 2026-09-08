@@ -6,7 +6,7 @@ from domainscan.helpers import EMAIL_RE, PHONE_RE, short
 
 
 try:
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup, Comment
     HAS_BS4 = True
 except Exception:
     HAS_BS4 = False
@@ -166,6 +166,7 @@ def analyze_soup(soup, page_url, html):
         method = (form.get("method", "get") or "get").upper()
         rows.append(("Form " + str(index), method + " " + short(action, 160)))
     rows.append(("Input count", str(len(soup.find_all("input")))))
+    rows.append(("Password fields", str(len(soup.find_all("input", {"type": "password"})))))
     rows.append(("Button count", str(len(soup.find_all("button")))))
     rows.append(("Iframe count", str(len(soup.find_all("iframe")))))
     for index, frame in enumerate(soup.find_all("iframe", src=True)[:5], 1):
@@ -173,6 +174,27 @@ def analyze_soup(soup, page_url, html):
     rows.append(("Table count", str(len(soup.find_all("table")))))
     rows.append(("Video count", str(len(soup.find_all("video")))))
     rows.append(("Audio count", str(len(soup.find_all("audio")))))
+    rows.extend(form_target_rows(forms, page_url))
+    if page_url.startswith("https://"):
+        mixed = count_mixed(soup)
+        if mixed:
+            rows.append(("Mixed content refs", str(mixed)))
+        else:
+            rows.append(("Mixed content refs", "None"))
+    rows.extend(comment_rows(soup))
+    inline_js = "\n".join(tag.string or "" for tag in soup.find_all("script") if not tag.get("src"))
+    paths = extract_js_paths(inline_js)
+    rows.append(("JS paths (inline)", str(len(paths))))
+    for index, path in enumerate(paths[:12], 1):
+        rows.append(("JS path " + str(index), short(path, 160)))
+    maps = html.lower().count("sourcemappingurl")
+    if maps:
+        rows.append(("Source maps referenced", str(maps)))
+    else:
+        rows.append(("Source maps referenced", "None"))
+    handlers = len(re.findall(r"\son[a-z]+\s*=", html, re.IGNORECASE))
+    rows.append(("Inline event handlers", str(handlers)))
+    rows.extend(seo_rows(soup, metas))
     text = soup.get_text(" ", strip=True)
     words = text.split()
     rows.append(("Visible words", str(len(words))))
@@ -180,6 +202,83 @@ def analyze_soup(soup, page_url, html):
     for index, (word, count) in enumerate(top_words(text), 1):
         rows.append(("Top word " + str(index), word + " (" + str(count) + " times)"))
     rows.extend(find_contacts(html, hrefs))
+    return rows
+
+
+def form_target_rows(forms, page_url):
+    rows = []
+    page_host = (urllib.parse.urlsplit(page_url).hostname or "").lower()
+    external_forms = []
+    for form in forms:
+        action = form.get("action", "")
+        if action.lower().startswith("http"):
+            target_host = (urllib.parse.urlsplit(action).hostname or "").lower()
+            if target_host and target_host != page_host:
+                external_forms.append(action)
+    rows.append(("External form targets", str(len(external_forms))))
+    for index, action in enumerate(external_forms[:3], 1):
+        rows.append(("External form " + str(index), short(action, 200)))
+    return rows
+
+
+def count_mixed(soup):
+    count = 0
+    for tag in soup.find_all(["img", "script", "link", "iframe", "video", "audio", "source", "embed"]):
+        for attr in ("src", "href"):
+            value = tag.get(attr, "")
+            if value.lower().startswith("http://"):
+                count += 1
+    return count
+
+
+def comment_rows(soup):
+    rows = []
+    comments = soup.find_all(string=lambda item: isinstance(item, Comment))
+    rows.append(("HTML comments", str(len(comments))))
+    for index, comment in enumerate(comments[:5], 1):
+        rows.append(("HTML comment " + str(index), short(str(comment), 160)))
+    blob = " ".join(str(item).lower() for item in comments)
+    keywords = [word for word in ("password", "secret", "api key", "apikey", "todo", "fixme", "hack") if word in blob]
+    if keywords:
+        rows.append(("Comment keywords", "Found: " + ", ".join(keywords)))
+    return rows
+
+
+def extract_js_paths(js):
+    found = []
+    for match in re.findall(r"[\"'](/[A-Za-z0-9_\-./?=&%]{2,120})[\"']", js or ""):
+        if match.startswith("//"):
+            continue
+        if len(match) > 2 and match not in found:
+            found.append(match)
+    return found[:40]
+
+
+def seo_rows(soup, metas):
+    rows = []
+    canonical = ""
+    for tag in soup.find_all("link", href=True):
+        rel = tag.get("rel", [])
+        if isinstance(rel, str):
+            rel = [rel]
+        if "canonical" in [item.lower() for item in rel]:
+            canonical = tag.get("href", "")
+    if canonical:
+        rows.append(("Canonical URL", short(canonical, 200)))
+    else:
+        rows.append(("Canonical URL", "Missing"))
+    langs = []
+    for tag in soup.find_all("link", href=True):
+        if tag.get("hreflang"):
+            langs.append(tag.get("hreflang"))
+    rows.append(("Hreflang count", str(len(langs))))
+    if langs:
+        rows.append(("Hreflang langs", ", ".join(sorted(set(langs))[:10])))
+    done = sum(1 for key in ("og:title", "og:type", "og:url", "og:image") if metas.get(key))
+    rows.append(("OG completeness", str(done) + " of 4"))
+    description = metas.get("description", "")
+    if description:
+        rows.append(("Description length", str(len(description)) + " characters"))
     return rows
 
 
@@ -294,28 +393,73 @@ def detect_tech(html, headers, cookies, metas):
     powered = headers.get("X-Powered-By", "")
     generator = metas.get("generator", "")
     via = headers.get("Via", "")
-    if "cloudflare" in server.lower() or headers.get("CF-Ray", ""):
+    server_low = server.lower()
+    if "cloudflare" in server_low or headers.get("CF-Ray", ""):
         add("Cloudflare", "CDN and protection, seen in response headers")
-    if "nginx" in server.lower():
+    if "nginx" in server_low:
         add("nginx", "Web server, advertised in Server header")
-    if "apache" in server.lower():
+    if "apache" in server_low:
         add("Apache", "Web server, advertised in Server header")
-    if "litespeed" in server.lower():
+    if "litespeed" in server_low:
         add("LiteSpeed", "Web server, advertised in Server header")
-    if "microsoft-iis" in server.lower():
+    if "microsoft-iis" in server_low:
         add("IIS", "Web server, advertised in Server header")
-    if "openresty" in server.lower():
+    if "openresty" in server_low:
         add("OpenResty", "Web server, advertised in Server header")
-    if "varnish" in via.lower() or "varnish" in server.lower():
+    if "caddy" in server_low:
+        add("Caddy", "Web server, advertised in Server header")
+    if "traefik" in server_low:
+        add("Traefik", "Proxy, advertised in Server header")
+    if "envoy" in server_low:
+        add("Envoy", "Proxy, advertised in Server header")
+    if "gunicorn" in server_low:
+        add("Gunicorn", "App server, advertised in Server header")
+    if "uvicorn" in server_low:
+        add("Uvicorn", "App server, advertised in Server header")
+    if "werkzeug" in server_low:
+        add("Werkzeug", "App server, advertised in Server header")
+    if "kestrel" in server_low:
+        add("Kestrel", "App server, advertised in Server header")
+    if "jetty" in server_low:
+        add("Jetty", "App server, advertised in Server header")
+    if "coyote" in server_low or "tomcat" in server_low:
+        add("Tomcat", "App server, advertised in Server header")
+    if server_low in ("gws", "sffe", "gse") or server_low.startswith("gws "):
+        add("Google frontend", "Edge server, advertised in Server header")
+    if "amazons3" in server_low or "awselb" in server_low or headers.get("X-Amz-Request-Id", ""):
+        add("AWS", "Cloud marker seen in response headers")
+    if "microsoft-httpapi" in server_low or headers.get("X-Azure-Ref", ""):
+        add("Azure", "Cloud marker seen in response headers")
+    if "netlify" in server_low or headers.get("X-Nf-Request-Id", ""):
+        add("Netlify", "Hosting marker seen in response headers")
+    if "vercel" in server_low or headers.get("X-Vercel-Id", ""):
+        add("Vercel", "Hosting marker seen in response headers")
+    if "heroku" in via.lower() or "heroku" in server_low:
+        add("Heroku", "Hosting marker seen in response headers")
+    if "fly.io" in via.lower() or "flyio" in server_low:
+        add("Fly.io", "Hosting marker seen in response headers")
+    if "bunnycdn" in server_low:
+        add("BunnyCDN", "CDN, advertised in Server header")
+    if "keycdn" in server_low:
+        add("KeyCDN", "CDN, advertised in Server header")
+    if "varnish" in via.lower() or "varnish" in server_low or headers.get("X-Varnish", ""):
         add("Varnish", "Cache layer, seen in response headers")
-    if "cloudfront" in via.lower() or "cloudfront" in server.lower():
+    if "cloudfront" in via.lower() or "cloudfront" in server_low:
         add("CloudFront", "CDN, seen in response headers")
-    if "fastly" in via.lower() or "fastly" in server.lower():
+    if "fastly" in via.lower() or "fastly" in server_low:
         add("Fastly", "CDN, seen in response headers")
-    if "sucuri" in server.lower():
+    if "sucuri" in server_low:
         add("Sucuri", "Protection layer, advertised in Server header")
-    if "incapsula" in server.lower() or "imperva" in server.lower():
+    if "incapsula" in server_low or "imperva" in server_low:
         add("Imperva", "Protection layer, advertised in Server header")
+    if headers.get("X-AspNet-Version", ""):
+        add("ASP.NET " + headers["X-AspNet-Version"], "Framework, advertised in headers")
+    if headers.get("X-AspNetMvc-Version", ""):
+        add("ASP.NET MVC " + headers["X-AspNetMvc-Version"], "Framework, advertised in headers")
+    if headers.get("X-Runtime", ""):
+        add("Ruby on Rails", "Framework, X-Runtime header observed")
+    if headers.get("X-Generator", ""):
+        add(headers["X-Generator"].split("/")[0].strip() + " (header)", "Declared in X-Generator header")
     if powered:
         name = powered.split("/")[0].strip()
         if name:
@@ -340,6 +484,14 @@ def detect_tech(html, headers, cookies, metas):
         add("Svelte", "Framework marker found in page")
     if "ember.js" in low:
         add("Ember.js", "Framework marker found in page")
+    if "htmx" in low:
+        add("htmx", "Library marker found in page")
+    if "alpinejs" in low or "alpine.js" in low:
+        add("Alpine.js", "Library marker found in page")
+    if "@vite/client" in low:
+        add("Vite", "Build tool marker found in page")
+    if "webpackchunk" in low:
+        add("webpack", "Bundler marker found in page")
     if "backbone" in low:
         add("Backbone.js", "Library marker found in page")
     if "lodash" in low:
@@ -364,6 +516,16 @@ def detect_tech(html, headers, cookies, metas):
         add("Chart.js", "Chart library referenced in page")
     if "d3.min.js" in low or "d3.v" in low:
         add("D3.js", "Chart library referenced in page")
+    if "firebase" in low:
+        add("Firebase", "Backend marker found in page")
+    if "supabase" in low:
+        add("Supabase", "Backend marker found in page")
+    if "contentful" in low:
+        add("Contentful", "CMS marker found in page")
+    if "strapi" in low:
+        add("Strapi", "CMS marker found in page")
+    if "sanity.io" in low:
+        add("Sanity", "CMS marker found in page")
     if "googletagmanager.com" in low:
         add("Google Tag Manager", "Analytics tag found in page")
     if "google-analytics.com" in low or "gtag(" in low:
@@ -380,6 +542,60 @@ def detect_tech(html, headers, cookies, metas):
         add("Microsoft Clarity", "Tracking tag found in page")
     if "mc.yandex" in low or "yandex-metrica" in low:
         add("Yandex Metrica", "Analytics tag found in page")
+    if "segment.com" in low or "segment.io" in low:
+        add("Segment", "Tracking tag found in page")
+    if "amplitude" in low:
+        add("Amplitude", "Analytics tag found in page")
+    if "optimizely" in low:
+        add("Optimizely", "Testing tag found in page")
+    if "crazyegg" in low:
+        add("Crazy Egg", "Tracking tag found in page")
+    if "quantcast" in low:
+        add("Quantcast", "Tracking tag found in page")
+    if "adsbygoogle" in low:
+        add("AdSense", "Ad tag found in page")
+    if "doubleclick" in low:
+        add("DoubleClick", "Ad tag found in page")
+    if "criteo" in low:
+        add("Criteo", "Ad tag found in page")
+    if "taboola" in low:
+        add("Taboola", "Ad tag found in page")
+    if "outbrain" in low:
+        add("Outbrain", "Ad tag found in page")
+    if "newrelic" in low:
+        add("New Relic", "Monitoring tag found in page")
+    if "datadog" in low:
+        add("Datadog", "Monitoring tag found in page")
+    if "sentry" in low:
+        add("Sentry", "Monitoring tag found in page")
+    if "intercom" in low:
+        add("Intercom", "Chat widget found in page")
+    if "zendesk" in low or "zdassets" in low:
+        add("Zendesk", "Support widget found in page")
+    if "drift.com" in low:
+        add("Drift", "Chat widget found in page")
+    if "hubspot" in low or "hs-scripts" in low:
+        add("HubSpot", "Marketing tag found in page")
+    if "mailchimp" in low:
+        add("Mailchimp", "Marketing tag found in page")
+    if "klaviyo" in low:
+        add("Klaviyo", "Marketing tag found in page")
+    if "tawk.to" in low:
+        add("Tawk.to", "Chat widget found in page")
+    if "crisp.chat" in low:
+        add("Crisp", "Chat widget found in page")
+    if "livechatinc" in low:
+        add("LiveChat", "Chat widget found in page")
+    if "freshchat" in low:
+        add("Freshchat", "Chat widget found in page")
+    if "cookiebot" in low:
+        add("Cookiebot", "Consent widget found in page")
+    if "onetrust" in low:
+        add("OneTrust", "Consent widget found in page")
+    if "trustpilot" in low:
+        add("Trustpilot", "Review widget found in page")
+    if "disqus" in low:
+        add("Disqus", "Comment widget found in page")
     if generator:
         add(generator.split()[0] + " (generator)", "Declared in meta generator tag")
     if "wp-content" in low or "wp-includes" in low:
@@ -392,6 +608,12 @@ def detect_tech(html, headers, cookies, metas):
         add("Joomla", "CMS marker found in page")
     if "drupal" in low or headers.get("X-Drupal-Cache", ""):
         add("Drupal", "CMS marker found in page or headers")
+    if "prestashop" in low:
+        add("PrestaShop", "Store platform marker found")
+    if "magento" in low or "/mage/" in low:
+        add("Magento", "Store platform marker found")
+    if "bigcommerce" in low:
+        add("BigCommerce", "Store platform marker found")
     if "cdn.shopify.com" in low or headers.get("X-Shopify-Stage", ""):
         add("Shopify", "Store platform marker found")
     if "static.wixstatic.com" in low or "wix.com" in low:
@@ -400,6 +622,8 @@ def detect_tech(html, headers, cookies, metas):
         add("Squarespace", "Site builder marker found")
     if "webflow" in low:
         add("Webflow", "Site builder marker found")
+    if "weebly" in low:
+        add("Weebly", "Site builder marker found")
     if "ghost.min.js" in low:
         add("Ghost", "CMS marker found in page")
     if "__viewstate" in low:
@@ -408,12 +632,12 @@ def detect_tech(html, headers, cookies, metas):
         add("reCAPTCHA", "Captcha widget found in page")
     if "hcaptcha" in low:
         add("hCaptcha", "Captcha widget found in page")
+    if "challenges.cloudflare.com" in low:
+        add("Cloudflare Turnstile", "Captcha widget found in page")
     if "js.stripe.com" in low:
         add("Stripe", "Payment script found in page")
     if "paypal" in low:
         add("PayPal", "Payment marker found in page")
-    if "disqus" in low:
-        add("Disqus", "Comment widget found in page")
     if "font-awesome" in low:
         add("Font Awesome", "Icon font referenced in page")
     if "fonts.googleapis.com" in low or "fonts.gstatic.com" in low:

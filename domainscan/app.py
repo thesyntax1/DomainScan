@@ -33,6 +33,7 @@ class DomainScanApp:
         self.all_rows = []
         self.scanning = False
         self.ports_var = tk.BooleanVar(value=True)
+        self.sub_var = tk.BooleanVar(value=True)
         self.setup_style()
         self.build_header()
         self.build_input()
@@ -87,8 +88,10 @@ class DomainScanApp:
         self.scan_button.pack(side="left")
         clear = ttk.Button(bar, text="Clear", command=self.clear_all)
         clear.pack(side="left", padx=(6, 0))
-        ports = ttk.Checkbutton(bar, text="Port check", variable=self.ports_var)
+        ports = ttk.Checkbutton(bar, text="Ports", variable=self.ports_var)
         ports.pack(side="left", padx=(14, 0))
+        subs = ttk.Checkbutton(bar, text="Subdomains", variable=self.sub_var)
+        subs.pack(side="left", padx=(8, 0))
         for text, command in (("TXT", self.export_txt), ("CSV", self.export_csv), ("JSON", self.export_json)):
             button = ttk.Button(bar, text=text, command=command)
             button.pack(side="right", padx=(0, 6))
@@ -181,7 +184,7 @@ class DomainScanApp:
         def forward(percent, message):
             self.queue.put(("progress", percent, message))
         try:
-            result = scanner.run_scan(target, on_progress=forward, include_ports=self.ports_var.get())
+            result = scanner.run_scan(target, on_progress=forward, include_ports=self.ports_var.get(), include_subdomains=self.sub_var.get())
         except ValueError as exc:
             self.queue.put(("invalid", str(exc)))
             return
@@ -378,9 +381,10 @@ class DomainScanApp:
             "Legal website and domain intelligence.",
             "",
             "Collects only publicly available data:",
-            "DNS, WHOIS/RDAP, IP geolocation, HTTP headers,",
-            "TLS certificates, mail authentication, page content,",
-            "technology markers and common port reachability.",
+            "DNS, subdomains, WHOIS/RDAP, IP geolocation,",
+            "BGP, blocklists, HTTP headers, TLS certificates,",
+            "mail authentication, page content, technology",
+            "markers, web archive history and port reachability.",
             "",
             "Only scan domains you own or are allowed to test.",
         ]
