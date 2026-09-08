@@ -3,7 +3,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from domainscan import __version__, helpers, scanner
+from domainscan import __version__, helpers, history_store, profiles, scanner
 
 
 APP_TITLE = "DomainScan"
@@ -34,13 +34,34 @@ class DomainScanApp:
         self.scanning = False
         self.ports_var = tk.BooleanVar(value=True)
         self.sub_var = tk.BooleanVar(value=True)
+        self.caps = profiles.get_profile("Standard")
         self.setup_style()
+        self.build_menu()
         self.build_header()
         self.build_input()
         self.build_progress()
         self.build_main()
         self.build_status()
         self.poll_queue()
+
+    def build_menu(self):
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Export JSON", command=self.export_json)
+        file_menu.add_command(label="Export CSV", command=self.export_csv)
+        file_menu.add_command(label="Export TXT", command=self.export_txt)
+        file_menu.add_command(label="Export HTML", command=self.export_html)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.root.destroy)
+        scan_menu = tk.Menu(menubar, tearoff=0)
+        scan_menu.add_command(label="Start Scan", command=self.start_scan)
+        scan_menu.add_command(label="Compare with Previous", command=self.compare_scan)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About", command=self.show_about)
+        menubar.add_cascade(label="File", menu=file_menu)
+        menubar.add_cascade(label="Scan", menu=scan_menu)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        self.root.configure(menu=menubar)
 
     def setup_style(self):
         style = ttk.Style()
@@ -88,11 +109,13 @@ class DomainScanApp:
         self.scan_button.pack(side="left")
         clear = ttk.Button(bar, text="Clear", command=self.clear_all)
         clear.pack(side="left", padx=(6, 0))
+        compare = ttk.Button(bar, text="Compare", command=self.compare_scan)
+        compare.pack(side="left", padx=(6, 0))
         ports = ttk.Checkbutton(bar, text="Ports", variable=self.ports_var)
         ports.pack(side="left", padx=(14, 0))
         subs = ttk.Checkbutton(bar, text="Subdomains", variable=self.sub_var)
         subs.pack(side="left", padx=(8, 0))
-        for text, command in (("TXT", self.export_txt), ("CSV", self.export_csv), ("JSON", self.export_json)):
+        for text, command in (("HTML", self.export_html), ("TXT", self.export_txt), ("CSV", self.export_csv), ("JSON", self.export_json)):
             button = ttk.Button(bar, text=text, command=command)
             button.pack(side="right", padx=(0, 6))
 
@@ -122,6 +145,12 @@ class DomainScanApp:
         self.section_box.pack(side="left", padx=(8, 0))
         self.section_box.set("All sections")
         self.section_box.bind("<<ComboboxSelected>>", lambda event: self.apply_filter())
+        profile_label = ttk.Label(filter_bar, text="Profile:")
+        profile_label.pack(side="left", padx=(16, 0))
+        self.profile_box = ttk.Combobox(filter_bar, values=profiles.profile_names(), state="readonly", width=12)
+        self.profile_box.pack(side="left", padx=(8, 0))
+        self.profile_box.set("Standard")
+        self.profile_box.bind("<<ComboboxSelected>>", lambda event: self.on_profile())
         main = ttk.Frame(self.root)
         main.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         self.tree = ttk.Treeview(main, columns=("item", "value"))
@@ -159,6 +188,11 @@ class DomainScanApp:
         self.bottom = ttk.Label(self.root, text="DomainScan collects only publicly available data. Only scan domains you own or are allowed to test.", style="Muted.TLabel")
         self.bottom.pack(fill="x", padx=16, pady=(0, 10))
 
+    def on_profile(self):
+        self.caps = profiles.get_profile(self.profile_box.get())
+        self.ports_var.set(self.caps["include_ports"])
+        self.sub_var.set(self.caps["include_subdomains"])
+
     def start_scan(self):
         if self.scanning:
             return
@@ -184,7 +218,17 @@ class DomainScanApp:
         def forward(percent, message):
             self.queue.put(("progress", percent, message))
         try:
-            result = scanner.run_scan(target, on_progress=forward, include_ports=self.ports_var.get(), include_subdomains=self.sub_var.get())
+            caps = self.caps
+            result = scanner.run_scan(
+                target,
+                on_progress=forward,
+                include_ports=self.ports_var.get(),
+                include_subdomains=self.sub_var.get(),
+                timeout=caps["timeout"],
+                crawl_pages=caps["crawl_pages"],
+                js_files=caps["js_files"],
+                subdomain_web=caps["subdomain_web"],
+            )
         except ValueError as exc:
             self.queue.put(("invalid", str(exc)))
             return
@@ -227,6 +271,10 @@ class DomainScanApp:
         self.section_box.configure(values=sections)
         self.apply_filter()
         self.set_detail("Scan of " + result["target"]["host"] + " finished with " + str(meta["findings"]) + " findings.")
+        try:
+            history_store.save_run(result)
+        except Exception:
+            pass
 
     def fail_scan(self, text):
         self.scanning = False
@@ -374,6 +422,46 @@ class DomainScanApp:
             messagebox.showerror("Export failed", str(exc))
             return
         messagebox.showinfo("Export complete", "Text report saved.")
+
+    def compare_scan(self):
+        if not self.result or self.scanning:
+            messagebox.showinfo("Nothing to compare", "Run a scan first, then compare it with a previous one.")
+            return
+        host = self.result["target"]["host"]
+        try:
+            previous = history_store.previous_run(host, self.result["meta"]["scanned_at"])
+        except Exception:
+            previous = None
+        if not previous:
+            messagebox.showinfo("No previous scans", "No earlier scan found for " + host + ".")
+            return
+        changes = history_store.diff_runs(previous, self.result)
+        merged = {"Changes": changes}
+        for section, items in self.result["sections"].items():
+            merged[section] = items
+        self.result["sections"] = merged
+        self.all_rows = []
+        for section, items in merged.items():
+            for key, value in items:
+                self.all_rows.append((section, key, value))
+        sections = ["All sections"] + list(merged.keys())
+        self.section_box.configure(values=sections)
+        self.section_box.set("Changes")
+        self.apply_filter()
+        self.set_detail("Compared with scan from " + str(previous["meta"].get("scanned_at", "earlier")) + ". " + str(len(changes)) + " change rows.")
+
+    def export_html(self):
+        if not self.need_result():
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".html", filetypes=[("HTML report", "*.html")])
+        if not path:
+            return
+        try:
+            helpers.export_html(path, self.result)
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+        messagebox.showinfo("Export complete", "HTML report saved.")
 
     def show_about(self):
         lines = [

@@ -2,7 +2,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from domainscan import __version__
-from domainscan import bgp_check, content_check, dns_check, files_check, helpers, history_check, http_check, mail_check, network_check, ports_check, reputation_check, subdomain_check, web_extra_check, whois_check
+from domainscan import bgp_check, content_check, crawl_check, dns_check, files_check, helpers, history_check, http_check, js_check, mail_check, network_check, ports_check, reputation_check, subdomain_check, web_extra_check, whois_check
 
 
 def safe_run(func):
@@ -12,7 +12,7 @@ def safe_run(func):
         return {"rows": [("Status", "Check failed (" + exc.__class__.__name__ + ": " + helpers.short(str(exc), 160) + ")")]}
 
 
-def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomains=True, timeout=12):
+def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomains=True, timeout=12, crawl_pages=15, js_files=6, subdomain_web=20):
     started = time.perf_counter()
 
     def emit(percent, message):
@@ -67,9 +67,10 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
             section, message = futures[future]
             results[section] = future.result()
             done += 1
-            emit(10 + int(68 * done / total), message)
+            emit(10 + int(62 * done / total), message)
     sections["WHOIS / RDAP"] = results["WHOIS / RDAP"]["rows"]
     sections["Subdomains"] = results["Subdomains"]["rows"]
+    confirmed = results["Subdomains"].get("confirmed", {}) or {}
     sections["Network"] = results["Network"]["rows"]
     sections["BGP"] = results["BGP"]["rows"]
     sections["Reputation"] = results["Reputation"]["rows"]
@@ -81,7 +82,7 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
     sections["Web History"] = results["Web History"]["rows"]
     sections["Ports"] = results["Ports"]["rows"]
 
-    emit(82, "Analyzing page content")
+    emit(76, "Analyzing page content")
     try:
         content_result = content_check.collect(web.get("html", ""), web.get("final_url", fetch_url), web.get("headers", {}), web.get("cookies", []))
         sections["Content"] = content_result["rows"]
@@ -89,17 +90,27 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
     except Exception as exc:
         sections["Content"] = [("Status", "Check failed (" + exc.__class__.__name__ + ")")]
         sections["Technologies"] = [("Status", "Skipped")]
-    emit(90, "Running extra web checks")
-    try:
-        extra = web_extra_check.collect(info["base_url"], web.get("headers", {}), timeout)
-        sections["Web Extras"] = extra["rows"]
-    except Exception as exc:
-        sections["Web Extras"] = [("Status", "Check failed (" + exc.__class__.__name__ + ")")]
+
+    emit(84, "Running extra checks")
+    html = web.get("html", "")
+    final_url = web.get("final_url", fetch_url)
+    post_jobs = [
+        ("Web Extras", lambda: web_extra_check.collect(info["base_url"], web.get("headers", {}), timeout)),
+        ("Crawl", lambda: crawl_check.collect(final_url, timeout, crawl_pages) if html else {"rows": [("Crawl", "Skipped (no page content)")]}),
+        ("JS Analysis", lambda: js_check.collect(final_url, html, timeout, js_files) if html else {"rows": [("JS analysis", "Skipped (no page content)")]}),
+        ("Subdomain Web", lambda: subdomain_check.probe_web(confirmed, subdomain_web, timeout) if confirmed and subdomain_web > 0 else {"rows": [("Subdomain web", "Skipped")]}),
+    ]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {}
+        for section, func in post_jobs:
+            futures[pool.submit(safe_run, func)] = section
+        for future in as_completed(futures):
+            sections[futures[future]] = future.result()["rows"]
 
     emit(96, "Finishing")
     duration = time.perf_counter() - started
     ordered = {}
-    for section in ("Target", "DNS", "Subdomains", "WHOIS / RDAP", "Network", "BGP", "Reputation", "Website", "Web Extras", "TLS", "Mail", "Content", "Technologies", "Site Files", "Web History", "Ports"):
+    for section in ("Target", "DNS", "Subdomains", "Subdomain Web", "WHOIS / RDAP", "Network", "BGP", "Reputation", "Website", "Web Extras", "TLS", "Mail", "Content", "Crawl", "JS Analysis", "Technologies", "Site Files", "Web History", "Ports"):
         if section in sections:
             ordered[section] = sections[section]
     ordered["Summary"] = build_summary(info, ordered, duration)

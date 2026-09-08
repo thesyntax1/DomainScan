@@ -21,10 +21,14 @@ def collect(base_url, headers=None, timeout=10):
     host = urllib.parse.urlsplit(base_url).hostname or ""
     rows.extend(method_checks(session, base_url, timeout))
     rows.extend(header_checks(headers or {}))
+    rows.append(("Clickjacking", framing_verdict(headers or {})))
+    rows.extend(cors_check(session, base_url, timeout))
+    rows.extend(waf_probe(session, base_url, timeout))
     rows.append(("HSTS preload", hsts_preload(host)))
     rows.append(("IPv6 web", ipv6_web(host, base_url)))
     rows.extend(probe_404(session, base_url, timeout))
     rows.extend(sensitive_checks(session, base_url, timeout))
+    rows.extend(api_discovery(session, base_url, timeout))
     return {"rows": rows}
 
 
@@ -71,7 +75,157 @@ def header_checks(headers):
     timing = headers.get("Server-Timing", "")
     if timing:
         rows.append(("Server-Timing", short(timing, 160)))
+    policy = headers.get("X-Permitted-Cross-Domain-Policies", "")
+    if policy:
+        rows.append(("X-Permitted-Cross-Domain-Policies", short(policy, 120)))
     return rows
+
+
+def framing_verdict(headers):
+    xfo = headers.get("X-Frame-Options", "").upper()
+    csp = headers.get("Content-Security-Policy", "").lower()
+    if "frame-ancestors" in csp:
+        return "Blocked by CSP frame-ancestors"
+    if xfo in ("DENY", "SAMEORIGIN"):
+        return "Blocked (" + xfo + ")"
+    return "Framing allowed (no X-Frame-Options or frame-ancestors)"
+
+
+def cors_verdict(acao, vary, evil="https://evil.example"):
+    if not acao:
+        return "No CORS reflection"
+    if acao == "*":
+        return "Allows any origin (*)"
+    if evil in acao:
+        return "Reflects arbitrary origin (misconfigured)"
+    detail = "Reflects " + short(acao, 100)
+    if "origin" in vary.lower():
+        detail = detail + " (Vary: Origin present)"
+    return detail
+
+
+def cors_check(session, base_url, timeout):
+    rows = []
+    try:
+        response = session.get(base_url + "/", timeout=timeout, headers={"Origin": "https://evil.example"})
+    except Exception as exc:
+        rows.append(("CORS probe", "Request failed (" + exc.__class__.__name__ + ")"))
+        return rows
+    acao = response.headers.get("Access-Control-Allow-Origin", "")
+    vary = response.headers.get("Vary", "")
+    rows.append(("CORS probe", cors_verdict(acao, vary)))
+    creds = response.headers.get("Access-Control-Allow-Credentials", "")
+    if creds.lower() == "true":
+        rows.append(("CORS credentials", "Allowed (review with origin policy)"))
+    return rows
+
+
+def waf_signature(headers, body):
+    low_headers = " ".join((name + " " + value for name, value in headers.items())).lower()
+    low_body = (body or "").lower()
+    if "cf-ray" in low_headers or "cloudflare" in low_headers or "__cf_bm" in low_body:
+        return "Cloudflare"
+    if "sucuri" in low_headers or "sucuri" in low_body:
+        return "Sucuri"
+    if "incapsula" in low_headers or "incap_ses" in low_body:
+        return "Imperva"
+    if "akamai" in low_headers or "akamaighost" in low_body:
+        return "Akamai"
+    if "bigip" in low_headers or "f5" in low_headers:
+        return "F5 BIG-IP"
+    if "barracuda" in low_headers:
+        return "Barracuda"
+    if "fortigate" in low_headers or "fortinet" in low_body:
+        return "Fortinet"
+    if "awselb" in low_headers or "awselb" in low_headers:
+        return "AWS ELB"
+    if "x-sucuri-id" in low_headers:
+        return "Sucuri"
+    return ""
+
+
+def waf_probe(session, base_url, timeout):
+    import requests
+    rows = []
+    try:
+        normal = session.get(base_url + "/", timeout=timeout)
+        normal_status = normal.status_code
+    except Exception as exc:
+        rows.append(("WAF probe", "Request failed (" + exc.__class__.__name__ + ")"))
+        return rows
+    try:
+        probe = session.get(base_url + "/", params={"x": "<script>alert(1)</script>"}, timeout=timeout)
+    except Exception as exc:
+        rows.append(("WAF probe", "Probe failed (" + exc.__class__.__name__ + ")"))
+        return rows
+    name = waf_signature(probe.headers, probe.text or "")
+    rows.append(("WAF probe status", str(probe.status_code) + " (normal " + str(normal_status) + ")"))
+    if probe.status_code in (403, 406, 419, 501, 503) and probe.status_code != normal_status:
+        if name:
+            rows.append(("WAF verdict", "Request blocked, likely " + name))
+        else:
+            rows.append(("WAF verdict", "Request blocked by unknown filter"))
+    elif name:
+        rows.append(("WAF verdict", name + " detected in headers, probe not blocked"))
+    else:
+        rows.append(("WAF verdict", "No WAF blocking observed"))
+    return rows
+
+
+def api_discovery(session, base_url, timeout):
+    rows = []
+    targets = [
+        "/.well-known/openid-configuration",
+        "/api",
+        "/api/v1",
+        "/graphql",
+        "/swagger.json",
+        "/openapi.json",
+        "/api-docs",
+    ]
+    for path in targets:
+        try:
+            response = session.get(base_url + path, timeout=6)
+            status = response.status_code
+            body = response.text or ""
+            ctype = response.headers.get("Content-Type", "")
+        except Exception:
+            rows.append(("API " + path, "Request failed"))
+            continue
+        if path == "/.well-known/openid-configuration" and status == 200:
+            rows.append(("API " + path, parse_openid(body)))
+        elif path == "/graphql":
+            rows.append(("API " + path, graphql_hint(status, body, ctype)))
+        elif status == 200:
+            rows.append(("API " + path, "Exists (HTTP 200, " + str(len(body)) + " bytes)"))
+        elif status in (401, 403):
+            rows.append(("API " + path, "Protected (HTTP " + str(status) + ")"))
+        else:
+            rows.append(("API " + path, "HTTP " + str(status)))
+    return rows
+
+
+def parse_openid(body):
+    import json
+    try:
+        data = json.loads(body or "")
+    except Exception:
+        return "Exists but not valid JSON"
+    issuer = data.get("issuer", "")
+    if issuer:
+        return "OpenID provider, issuer " + short(issuer, 120)
+    return "JSON found, no issuer field"
+
+
+def graphql_hint(status, body, ctype):
+    low = (body or "").lower()
+    if "graphql" in low or '"errors"' in low or '"data"' in low:
+        return "GraphQL endpoint likely (HTTP " + str(status) + ")"
+    if status == 200:
+        return "Exists (HTTP 200)"
+    if status in (400, 405) and "json" in ctype.lower():
+        return "GraphQL endpoint possible (HTTP " + str(status) + " JSON)"
+    return "HTTP " + str(status)
 
 
 def parse_alt_svc(value):

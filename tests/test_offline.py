@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import bgp_check, content_check, dns_check, files_check, helpers, history_check, http_check, mail_check, network_check, ports_check, reputation_check, subdomain_check, web_extra_check, whois_check
+from domainscan import bgp_check, content_check, crawl_check, dns_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, ports_check, profiles, reputation_check, subdomain_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -383,7 +383,7 @@ class LocalHandler(BaseHTTPRequestHandler):
             self.send_header("Location", "/")
             self.end_headers()
         elif self.path == "/":
-            self.send_body("<html><head><title>Local</title></head><body><p>Hello</p></body></html>", extra={
+            self.send_body("<html><head><title>Local</title></head><body><p>Hello</p><a href=\"/page1\">p1</a><a href=\"/page2\">p2</a><a href=\"/missing\">m</a></body></html>", extra={
                 "X-Test-Header": "test-value",
                 "Strict-Transport-Security": "max-age=31536000",
                 "Set-Cookie": "session=abc123; Path=/; HttpOnly",
@@ -396,6 +396,23 @@ class LocalHandler(BaseHTTPRequestHandler):
             self.send_body("Contact: mailto:security@example.com\nExpires: 2027-01-01T00:00:00.000Z\n", "text/plain")
         elif self.path == "/ads.txt":
             self.send_body("google.com, pub-123, DIRECT\n", "text/plain")
+        elif self.path == "/page1":
+            self.send_body("<html><head><title>Page One</title></head><body><a href=\"/page2\">p2</a></body></html>")
+        elif self.path == "/page2":
+            self.send_body("<html><head><title>Page Two</title></head><body><p>End</p></body></html>")
+        elif self.path == "/app.js":
+            self.send_body('fetch("/api/v2/items");var key="AKIAIOSFODNN7EXAMPLE";', "application/javascript")
+        elif self.path == "/.well-known/openid-configuration":
+            self.send_body('{"issuer": "https://auth.local", "jwks_uri": "https://auth.local/keys"}', "application/json")
+        elif self.path == "/graphql":
+            body = b'{"errors": [{"message": "GET query missing"}]}'
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/.well-known/mta-sts.txt":
+            self.send_body("version: STSv1\nmode: enforce\nmax_age: 86400\nmx: mail.example.com\n", "text/plain")
         elif self.path == "/favicon.ico":
             self.send_body(b"\x00\x01\x02\x03\x04\x05", "image/x-icon")
         elif self.path == "/site.webmanifest":
@@ -856,6 +873,340 @@ class PingTest(unittest.TestCase):
     def test_localhost(self):
         result = network_check.ping("127.0.0.1")
         self.assertTrue("Reply" in result or "No reply" in result)
+
+
+class NoSitemapHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        host = self.headers.get("Host", "localhost")
+        if self.path == "/robots.txt":
+            body = ("User-agent: *\nSitemap: http://" + host + "/custom-sitemap.xml\n").encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/custom-sitemap.xml":
+            body = b'<urlset><url><loc>http://localhost/only</loc></url></urlset>'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/security.txt":
+            body = b"Contact: mailto:root@example.com\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+class LocalBase(unittest.TestCase):
+    handler = LocalHandler
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = HTTPServer(("127.0.0.1", 0), cls.handler)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = "http://127.0.0.1:" + str(cls.port)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+
+class ProfileTest(unittest.TestCase):
+    def test_profiles(self):
+        self.assertIn("Deep", profiles.profile_names())
+        self.assertEqual(profiles.get_profile("Quick")["crawl_pages"], 0)
+        self.assertEqual(profiles.get_profile("Deep")["subdomain_web"], 40)
+        self.assertEqual(profiles.get_profile("Nope")["timeout"], 12)
+
+
+class CliTest(unittest.TestCase):
+    def test_parser(self):
+        import main as entry
+        args = entry.build_parser().parse_args(["example.com", "--profile", "Deep", "--export", "r.html", "--quiet"])
+        self.assertEqual(args.target, "example.com")
+        self.assertEqual(args.profile, "Deep")
+        self.assertTrue(args.quiet)
+
+    def test_infer_format(self):
+        import main as entry
+        self.assertEqual(entry.infer_format("r.html"), "html")
+        self.assertEqual(entry.infer_format("R.JSON"), "json")
+        self.assertEqual(entry.infer_format("report"), "txt")
+
+
+class HistoryStoreTest(unittest.TestCase):
+    def make_result(self, stamp, extra=None):
+        sections = {"Target": [("Host", "example.com")], "DNS": [("A record 1", "93.184.216.34")]}
+        if extra:
+            sections["DNS"].append(extra)
+        return {
+            "target": {"host": "example.com"},
+            "sections": sections,
+            "meta": {"version": "1.2.0", "duration_seconds": 1.0, "scanned_at": stamp, "findings": 2},
+        }
+
+    def test_save_list_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self.make_result("2026-01-01 00:00:00 UTC")
+            path = history_store.save_run(first, tmp)
+            self.assertTrue(os.path.isfile(path))
+            self.assertEqual(len(history_store.list_runs("example.com", tmp)), 1)
+            loaded = history_store.load_run(path)
+            self.assertEqual(loaded["sections"]["DNS"][0][1], "93.184.216.34")
+
+    def test_previous_and_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            history_store.save_run(self.make_result("2026-01-01 00:00:00 UTC"), tmp)
+            time.sleep(1.1)
+            second = self.make_result("2026-01-02 00:00:00 UTC", ("AAAA record 1", "::1"))
+            second["sections"]["Target"] = [("Host", "example.com"), ("Port", "443")]
+            history_store.save_run(second, tmp)
+            previous = history_store.previous_run("example.com", "2026-01-02 00:00:00 UTC", tmp)
+            self.assertEqual(previous["meta"]["scanned_at"], "2026-01-01 00:00:00 UTC")
+            rows = history_store.diff_runs(previous, second)
+            data = rows_to_dict(rows)
+            self.assertEqual(data["Added"], "2")
+
+
+class ExportHtmlTest(unittest.TestCase):
+    def test_html(self):
+        result = {
+            "target": {"host": "example.com"},
+            "sections": {"DNS": [("Note", "<script>alert(1)</script>")]},
+            "meta": {"version": "1.2.0", "duration_seconds": 1.0, "scanned_at": "now", "findings": 1},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "r.html")
+            helpers.export_html(path, result)
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+            self.assertIn("<table>", text)
+            self.assertIn("&lt;script&gt;", text)
+            self.assertNotIn("<script>alert", text)
+
+
+class CrawlTest(LocalBase):
+    def test_crawl(self):
+        result = crawl_check.collect(self.base + "/", timeout=5, max_pages=10)
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data["Pages crawled"], "4")
+        self.assertEqual(data["Broken pages"], "1")
+        broken = [value for key, value in result["rows"] if key == "Broken"]
+        self.assertTrue(any("/missing" in value for value in broken))
+
+    def test_disabled(self):
+        result = crawl_check.collect(self.base + "/", timeout=5, max_pages=0)
+        self.assertIn("Skipped", result["rows"][0][1])
+
+
+class JsAnalysisTest(LocalBase):
+    def test_secrets_and_endpoints(self):
+        html = '<script src="/app.js"></script><script>var g="AIza' + "A" * 35 + '";</script>'
+        result = js_check.collect(self.base + "/", html, timeout=5, max_files=4)
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data["External scripts found"], "1")
+        self.assertIn("2", data["JS files analyzed"])
+        self.assertIn("/api/v2/items", data["JS endpoint 1"])
+        self.assertEqual(data["Possible secrets"], "2")
+
+
+class ApiDiscoveryTest(LocalBase):
+    def test_apis(self):
+        import requests
+        session = requests.Session()
+        rows = web_extra_check.api_discovery(session, self.base, timeout=5)
+        data = rows_to_dict(rows)
+        self.assertIn("https://auth.local", data["API /.well-known/openid-configuration"])
+        self.assertIn("likely", data["API /graphql"])
+        self.assertEqual(data["API /api"], "HTTP 404")
+
+
+class CorsFramingTest(unittest.TestCase):
+    def test_cors_verdict(self):
+        self.assertEqual(web_extra_check.cors_verdict("", ""), "No CORS reflection")
+        self.assertEqual(web_extra_check.cors_verdict("*", ""), "Allows any origin (*)")
+        self.assertIn("misconfigured", web_extra_check.cors_verdict("https://evil.example", ""))
+        verdict = web_extra_check.cors_verdict("https://a.com", "Origin")
+        self.assertIn("Vary", verdict)
+
+    def test_framing(self):
+        self.assertIn("DENY", web_extra_check.framing_verdict({"X-Frame-Options": "DENY"}))
+        self.assertIn("frame-ancestors", web_extra_check.framing_verdict({"Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'"}))
+        self.assertIn("allowed", web_extra_check.framing_verdict({}))
+
+    def test_waf_signature(self):
+        self.assertEqual(web_extra_check.waf_signature({"CF-Ray": "x"}, ""), "Cloudflare")
+        self.assertEqual(web_extra_check.waf_signature({"Server": "Sucuri/Cloudproxy"}, ""), "Sucuri")
+        self.assertEqual(web_extra_check.waf_signature({}, ""), "")
+
+    def test_openid_graphql(self):
+        self.assertIn("issuer", web_extra_check.parse_openid('{"issuer": "https://a.local"}'))
+        self.assertIn("not valid", web_extra_check.parse_openid("nope"))
+        self.assertIn("likely", web_extra_check.graphql_hint(400, '{"errors": []}', "application/json"))
+
+
+class MtaStsDaneTest(LocalBase):
+    def test_policy(self):
+        rows = mail_check.describe_mta_sts_policy("example.com", self.base)
+        data = rows_to_dict(rows)
+        self.assertEqual(data["MTA-STS policy"], "Published")
+        self.assertEqual(data["MTA-STS mode"], "enforce")
+        self.assertEqual(data["MTA-STS MX patterns"], "1")
+
+    def test_dane(self):
+        resolver = FakeResolver({("_25._tcp.mail.example.com", "TLSA"): ["3 1 1 abc"]})
+        self.assertIn("published", mail_check.dane_status(resolver, "mail.example.com"))
+        self.assertEqual(mail_check.dane_status(FakeResolver({}), "mail.example.com"), "No TLSA record")
+
+
+class PortsWebTest(LocalBase):
+    def test_web_probe(self):
+        detail = ports_check.probe_web_port("127.0.0.1", self.port)
+        self.assertIn("200", detail)
+        self.assertIn("Local", detail)
+
+
+class CnameFollowTest(unittest.TestCase):
+    def test_chain(self):
+        resolver = FakeResolver({("a", "CNAME"): ["b."], ("b", "CNAME"): ["c."]})
+        self.assertEqual(dns_check.follow_cname(resolver, "a"), ["b", "c"])
+        self.assertEqual(dns_check.follow_cname(FakeResolver({}), "a"), [])
+
+
+OPENSSL_SAMPLE = """ 0 s:CN = example.com
+   i:C = US, O = Test CA, CN = Test Root
+ 1 s:C = US, O = Test CA, CN = Test Root
+   i:C = US, O = Test CA, CN = Test Root
+-----BEGIN CERTIFICATE-----
+AAA
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+BBB
+-----END CERTIFICATE-----
+Verify return code: 0 (ok)
+"""
+
+
+class OpensslParseTest(unittest.TestCase):
+    def test_chain(self):
+        rows = http_check.parse_openssl_chain(OPENSSL_SAMPLE)
+        data = rows_to_dict(rows)
+        self.assertEqual(data["Chain depth"], "2 certificates")
+        self.assertEqual(data["Chain subject 1"], "CN = example.com")
+        self.assertEqual(data["Chain verify"], "0 (ok)")
+
+    def test_empty(self):
+        rows = http_check.parse_openssl_chain("nope")
+        self.assertIn("No certificates", rows[0][1])
+
+    def test_weak_cipher(self):
+        accepted = "New, TLSv1.2, Cipher is DES-CBC3-SHA\nCipher    : DES-CBC3-SHA\n"
+        self.assertIn("ACCEPTED", http_check.parse_weak_cipher_output(accepted))
+        self.assertEqual(http_check.parse_weak_cipher_output("Cipher is (NONE)"), "Rejected (good)")
+        self.assertEqual(http_check.parse_weak_cipher_output("error: handshake failure"), "Rejected (good)")
+
+
+HTML3 = """<html><head><title>L</title>
+<script type="application/ld+json">{"@type": "Organization", "name": "Acme"}</script>
+</head><body>
+<form action="/login" method="post"><input name="username"><input type="password" name="pw"></form>
+<form action="/search"><input name="q"></form>
+</body></html>"""
+
+
+class ContentLoginTest(unittest.TestCase):
+    def test_login_and_jsonld(self):
+        result = content_check.collect(HTML3, "https://example.com/", {}, [])
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data["Login forms"], "1")
+        self.assertEqual(data["Login form 1"], "/login")
+        self.assertEqual(data["JSON-LD blocks"], "1")
+        self.assertEqual(data["Schema types"], "Organization")
+
+
+class TechCmsTest(unittest.TestCase):
+    def test_markers(self):
+        html = '<link href="/load.php?x">moodle xenforo typo3 opencart preact'
+        found = content_check.detect_tech(html, {}, [], {})
+        data = rows_to_dict(found)
+        self.assertIn("Tech: MediaWiki", data)
+        self.assertIn("Tech: Moodle", data)
+        self.assertIn("Tech: XenForo", data)
+        self.assertIn("Tech: TYPO3", data)
+        self.assertIn("Tech: OpenCart", data)
+        self.assertIn("Tech: Preact", data)
+
+
+class FilesFallbackTest(LocalBase):
+    handler = NoSitemapHandler
+
+    def test_fallbacks(self):
+        result = files_check.collect(self.base, timeout=5)
+        data = rows_to_dict(result["rows"])
+        self.assertIn("Present", data["sitemap (robots)"])
+        self.assertEqual(data["Sitemap URL count"], "1")
+        self.assertIn("Present", data["security.txt (root)"])
+
+
+class SubdomainProbeTest(LocalBase):
+    def test_fetch_page(self):
+        info = subdomain_check.fetch_subdomain_page(self.base + "/")
+        self.assertEqual(info["status"], 200)
+        self.assertEqual(info["title"], "Local")
+
+
+class ZAppWiringTest(unittest.TestCase):
+    def test_profile_compare_export(self):
+        from unittest import mock
+        fake_tkinter = mock.MagicMock()
+        sys.modules["tkinter"] = fake_tkinter
+        sys.modules.pop("domainscan.app", None)
+        try:
+            from domainscan import app as app_module
+            root = mock.MagicMock()
+            app = app_module.DomainScanApp(root)
+            app.profile_box.get.return_value = "Quick"
+            app.on_profile()
+            self.assertEqual(app.caps["crawl_pages"], 0)
+            app.tree.get_children.return_value = []
+            app.search_entry.get.return_value = ""
+            app.section_box.get.return_value = "All sections"
+            result = {
+                "target": {"host": "example.com"},
+                "sections": {"Target": [("Host", "example.com")]},
+                "meta": {"version": "1.2.0", "duration_seconds": 1.0, "scanned_at": "new", "findings": 1},
+            }
+            with mock.patch.object(app_module.history_store, "save_run", return_value="x"):
+                app.finish_scan(result)
+            old = {
+                "target": {"host": "example.com"},
+                "sections": {"Target": []},
+                "meta": {"version": "1.2.0", "duration_seconds": 1.0, "scanned_at": "old", "findings": 0},
+            }
+            with mock.patch.object(app_module.history_store, "previous_run", return_value=old):
+                app.compare_scan()
+            self.assertIn("Changes", app.result["sections"])
+            self.assertEqual(app.section_box.set.call_args[0][0], "Changes")
+            with mock.patch.object(app_module.history_store, "previous_run", return_value=None):
+                app.compare_scan()
+            app_module.filedialog.asksaveasfilename.return_value = ""
+            app.export_html()
+        finally:
+            sys.modules.pop("tkinter", None)
+            sys.modules.pop("domainscan.app", None)
 
 
 if __name__ == "__main__":

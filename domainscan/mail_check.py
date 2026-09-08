@@ -23,21 +23,24 @@ def collect(host, apex, dns_data):
     rows.append(("Mail domain", name))
     mx_records = dns_data.get("mx_apex") or dns_data.get("mx") or []
     txt_records = dns_data.get("txt_apex") or dns_data.get("txt") or []
-    rows.extend(describe_mx(mx_records))
-    rows.extend(describe_spf(txt_records))
+    resolver = None
     if dns_check.HAS_DNSPYTHON:
         resolver = dns_check.make_resolver()
-        rows.extend(describe_dmarc(resolver, name))
-        rows.extend(describe_dkim(resolver, name))
-        rows.extend(describe_bimi_mtasts(resolver, name))
-        rows.extend(describe_tlsrpt(resolver, name))
-        rows.extend(describe_autoconfig(resolver, name))
-    else:
+    rows.extend(describe_mx(mx_records, resolver))
+    rows.extend(describe_spf(txt_records))
+    if resolver is None:
         rows.append(("DMARC/DKIM", "Skipped (dnspython not installed)"))
+        return {"rows": rows}
+    rows.extend(describe_dmarc(resolver, name))
+    rows.extend(describe_dkim(resolver, name))
+    rows.extend(describe_bimi_mtasts(resolver, name))
+    rows.extend(describe_tlsrpt(resolver, name))
+    rows.extend(describe_autoconfig(resolver, name))
+    rows.extend(describe_mta_sts_policy(name))
     return {"rows": rows}
 
 
-def describe_mx(records):
+def describe_mx(records, resolver=None):
     rows = []
     if not records:
         rows.append(("MX records", "None (domain cannot receive mail)"))
@@ -69,7 +72,19 @@ def describe_mx(records):
             rows.append(("MX " + str(index) + " PTR", mx_ptr(addresses[0])))
         rows.append(("MX " + str(index) + " SMTP", smtp_probe(target)))
         rows.append(("MX " + str(index) + " STARTTLS", smtp_starttls(target)))
+        if resolver is not None and index <= 3:
+            rows.append(("MX " + str(index) + " DANE", dane_status(resolver, target)))
     return rows
+
+
+def dane_status(resolver, target):
+    try:
+        result = dns_check.query(resolver, "_25._tcp." + target, "TLSA")
+    except Exception:
+        return "Lookup failed"
+    if result["records"]:
+        return "TLSA published (" + str(len(result["records"])) + " records)"
+    return "No TLSA record"
 
 
 def mx_ptr(ip):
@@ -340,6 +355,34 @@ def describe_tlsrpt(resolver, name):
         rows.append(("TLS-RPT", short(records[0], 220)))
     else:
         rows.append(("TLS-RPT", "No TLS-RPT record"))
+    return rows
+
+
+def describe_mta_sts_policy(name, base_url=None):
+    import requests
+    from domainscan.helpers import BROWSER_UA
+    rows = []
+    if base_url:
+        url = base_url + "/.well-known/mta-sts.txt"
+    else:
+        url = "https://mta-sts." + name + "/.well-known/mta-sts.txt"
+    try:
+        response = requests.get(url, timeout=8, headers={"User-Agent": BROWSER_UA})
+    except Exception:
+        rows.append(("MTA-STS policy", "Fetch failed"))
+        return rows
+    if response.status_code != 200:
+        rows.append(("MTA-STS policy", "Not published (HTTP " + str(response.status_code) + ")"))
+        return rows
+    rows.append(("MTA-STS policy", "Published"))
+    for field in ("version", "mode", "max_age"):
+        match = re.search(r"^" + field + r":\s*(.+)$", response.text or "", re.IGNORECASE | re.MULTILINE)
+        if match:
+            rows.append(("MTA-STS " + field, short(match.group(1).strip(), 120)))
+    mx_list = re.findall(r"^mx:\s*(.+)$", response.text or "", re.IGNORECASE | re.MULTILINE)
+    rows.append(("MTA-STS MX patterns", str(len(mx_list))))
+    for index, pattern in enumerate(mx_list[:5], 1):
+        rows.append(("MTA-STS MX " + str(index), short(pattern.strip(), 120)))
     return rows
 
 

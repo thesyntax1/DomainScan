@@ -206,6 +206,11 @@ def security_summary(headers):
         rows.append(("CORS", "Allows " + short(cors, 120)))
     else:
         rows.append(("CORS", "No Access-Control-Allow-Origin header"))
+    encoding = headers.get("Content-Encoding", "")
+    if encoding:
+        rows.append(("Compression", encoding))
+    else:
+        rows.append(("Compression", "None (identity)"))
     return rows
 
 
@@ -242,6 +247,8 @@ def collect_tls(host, port=443):
     else:
         rows.append(("Chain trusted", "No: " + short(trust_error, 200)))
     rows.extend(parse_cert(cert, der, host))
+    rows.extend(openssl_chain(host, port))
+    rows.extend(weak_cipher_probe(host, port))
     return {"rows": rows}
 
 
@@ -289,6 +296,59 @@ def version_probe_rows(host, port):
     else:
         rows.append(("TLS 1.3", "Not supported"))
     return rows
+
+
+def openssl_chain(host, port=443, timeout=10):
+    import shutil
+    import subprocess
+    if not shutil.which("openssl"):
+        return []
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-showcerts"],
+            input="", capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return [("TLS chain (openssl)", "Probe failed")]
+    return parse_openssl_chain(proc.stdout or "")
+
+
+def parse_openssl_chain(text):
+    rows = []
+    count = text.count("BEGIN CERTIFICATE")
+    if not count:
+        return [("TLS chain (openssl)", "No certificates captured")]
+    rows.append(("Chain depth", str(count) + " certificates"))
+    subjects = re.findall(r"^\s*(?:\d+\s+)?s:(.+)$", text, re.MULTILINE)
+    for index, subject in enumerate(subjects[:5], 1):
+        rows.append(("Chain subject " + str(index), short(subject.strip(), 160)))
+    match = re.search(r"Verify return code: (\d+) \((.+?)\)", text)
+    if match:
+        rows.append(("Chain verify", match.group(1) + " (" + match.group(2) + ")"))
+    return rows
+
+
+def weak_cipher_probe(host, port=443, timeout=10):
+    import shutil
+    import subprocess
+    if not shutil.which("openssl"):
+        return []
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-cipher", "LOW:EXP:eNULL:@STRENGTH"],
+            input="", capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return [("Weak ciphers", "Probe failed")]
+    return [("Weak ciphers", parse_weak_cipher_output((proc.stdout or "") + (proc.stderr or "")))]
+
+
+def parse_weak_cipher_output(output):
+    low = output.lower()
+    if "cipher is (none)" in low or "handshake failure" in low or "no cipher" in low or "no protocols available" in low:
+        return "Rejected (good)"
+    match = re.search(r"Cipher\s*:\s*(\S+)", output)
+    if match and match.group(1) not in ("(NONE)", "0000", "None", "New,"):
+        return "ACCEPTED: " + match.group(1) + " (weak)"
+    return "Rejected (good)"
 
 
 def verify_handshake(host, port):

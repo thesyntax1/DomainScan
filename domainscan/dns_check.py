@@ -72,6 +72,24 @@ def query_type(resolver, name, rtype, rows, tag):
     return cleaned
 
 
+def follow_cname(resolver, host, cap=5):
+    chain = []
+    current = host
+    for _ in range(cap):
+        try:
+            result = query(resolver, current, "CNAME")
+        except Exception:
+            break
+        if not result["records"]:
+            break
+        target = result["records"][0].rstrip(".")
+        if not target or target in chain:
+            break
+        chain.append(target)
+        current = target
+    return chain
+
+
 def parse_soa(records):
     rows = []
     if not records:
@@ -202,6 +220,9 @@ def collect(host, apex):
     data["cname"] = query_type(resolver, host, "CNAME", rows, "")
     if data["cname"]:
         rows.append(("CNAME target", data["cname"][0]))
+        chain = follow_cname(resolver, host)
+        if len(chain) > 1:
+            rows.append(("CNAME chain", " -> ".join([host] + chain)))
     for rtype in DOMAIN_TYPES:
         key = rtype.lower()
         data[key] = query_type(resolver, host, rtype, rows, "")

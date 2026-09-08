@@ -10,15 +10,54 @@ def collect(base_url, timeout=10):
     rows = []
     session = requests.Session()
     session.headers.update({"User-Agent": BROWSER_UA})
-    rows.extend(parse_robots(fetch(session, base_url + "/robots.txt", timeout)))
-    rows.extend(parse_sitemap(fetch(session, base_url + "/sitemap.xml", timeout)))
-    rows.extend(parse_security(fetch(session, base_url + "/.well-known/security.txt", timeout)))
+    robots = parse_robots(fetch(session, base_url + "/robots.txt", timeout))
+    rows.extend(robots["rows"])
+    sitemap = fetch(session, base_url + "/sitemap.xml", timeout)
+    if not sitemap["ok"] and robots["sitemaps"]:
+        first = robots["sitemaps"][0]
+        if first.startswith("http"):
+            sitemap_url = first
+        else:
+            sitemap_url = base_url + first
+        try:
+            sitemap = fetch(session, sitemap_url, timeout)
+        except Exception:
+            pass
+        rows.extend(parse_sitemap(sitemap, "sitemap (robots)"))
+    else:
+        rows.extend(parse_sitemap(sitemap))
+    security = fetch(session, base_url + "/.well-known/security.txt", timeout)
+    if not security["ok"]:
+        fallback = fetch(session, base_url + "/security.txt", timeout)
+        if fallback["ok"]:
+            rows.extend(parse_security(fallback, "security.txt (root)"))
+        else:
+            rows.extend(parse_security(security))
+    else:
+        rows.extend(parse_security(security))
     ads = fetch(session, base_url + "/ads.txt", timeout)
     if ads["ok"]:
         lines = [line.strip() for line in ads["text"].splitlines() if line.strip()]
         rows.append(("ads.txt", "Present (" + str(len(lines)) + " entries)"))
     else:
         rows.append(("ads.txt", describe_missing(ads)))
+    humans = fetch(session, base_url + "/humans.txt", timeout)
+    if humans["ok"]:
+        rows.append(("humans.txt", "Present (" + str(humans["size"]) + " bytes)"))
+    else:
+        rows.append(("humans.txt", describe_missing(humans)))
+    crossdomain = fetch(session, base_url + "/crossdomain.xml", timeout)
+    if crossdomain["ok"]:
+        rows.append(("crossdomain.xml", "Present (" + str(crossdomain["size"]) + " bytes)"))
+        if "*" in crossdomain["text"]:
+            rows.append(("crossdomain.xml policy", "Wildcard found (review manually)"))
+    else:
+        rows.append(("crossdomain.xml", describe_missing(crossdomain)))
+    clientaccess = fetch(session, base_url + "/clientaccesspolicy.xml", timeout)
+    if clientaccess["ok"]:
+        rows.append(("clientaccesspolicy.xml", "Present (" + str(clientaccess["size"]) + " bytes)"))
+    else:
+        rows.append(("clientaccesspolicy.xml", describe_missing(clientaccess)))
     favicon = fetch(session, base_url + "/favicon.ico", timeout, text=False)
     if favicon["ok"]:
         detail = "Present (" + str(favicon["size"]) + " bytes"
@@ -66,7 +105,7 @@ def parse_robots(result):
     rows = []
     if not result["ok"]:
         rows.append(("robots.txt", describe_missing(result)))
-        return rows
+        return {"rows": rows, "sitemaps": []}
     lines = [line.strip() for line in result["text"].splitlines()]
     rules = [line for line in lines if line and not line.startswith("#")]
     allows = [line for line in rules if line.lower().startswith("allow:")]
@@ -93,17 +132,17 @@ def parse_robots(result):
         rows.append(("robots.txt disallow " + str(index), short(value, 160)))
     for index, target in enumerate(sitemaps[:5], 1):
         rows.append(("robots.txt sitemap " + str(index), short(target, 200)))
-    return rows
+    return {"rows": rows, "sitemaps": sitemaps}
 
 
-def parse_sitemap(result):
+def parse_sitemap(result, label="sitemap.xml"):
     rows = []
     if not result["ok"]:
-        rows.append(("sitemap.xml", describe_missing(result)))
+        rows.append((label, describe_missing(result)))
         return rows
     locations = re.findall(r"<loc>(.*?)</loc>", result["text"], re.IGNORECASE | re.DOTALL)
     locations = [re.sub(r"\s+", "", item) for item in locations if item.strip()]
-    rows.append(("sitemap.xml", "Present (" + str(result["size"]) + " bytes)"))
+    rows.append((label, "Present (" + str(result["size"]) + " bytes)"))
     if "<sitemapindex" in result["text"].lower():
         rows.append(("Sitemap type", "Index of sitemaps"))
     else:
@@ -114,12 +153,12 @@ def parse_sitemap(result):
     return rows
 
 
-def parse_security(result):
+def parse_security(result, label="security.txt"):
     rows = []
     if not result["ok"]:
-        rows.append(("security.txt", describe_missing(result)))
+        rows.append((label, describe_missing(result)))
         return rows
-    rows.append(("security.txt", "Present (" + str(result["size"]) + " bytes)"))
+    rows.append((label, "Present (" + str(result["size"]) + " bytes)"))
     fields = ["Contact", "Expires", "Encryption", "Acknowledgments", "Preferred-Languages", "Canonical", "Hiring", "Policy"]
     for field in fields:
         match = re.search(r"^" + field + r":\s*(.+)$", result["text"], re.IGNORECASE | re.MULTILINE)

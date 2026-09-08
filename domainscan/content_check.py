@@ -167,6 +167,7 @@ def analyze_soup(soup, page_url, html):
         rows.append(("Form " + str(index), method + " " + short(action, 160)))
     rows.append(("Input count", str(len(soup.find_all("input")))))
     rows.append(("Password fields", str(len(soup.find_all("input", {"type": "password"})))))
+    rows.extend(login_form_rows(forms))
     rows.append(("Button count", str(len(soup.find_all("button")))))
     rows.append(("Iframe count", str(len(soup.find_all("iframe")))))
     for index, frame in enumerate(soup.find_all("iframe", src=True)[:5], 1):
@@ -195,6 +196,7 @@ def analyze_soup(soup, page_url, html):
     handlers = len(re.findall(r"\son[a-z]+\s*=", html, re.IGNORECASE))
     rows.append(("Inline event handlers", str(handlers)))
     rows.extend(seo_rows(soup, metas))
+    rows.extend(jsonld_rows(soup))
     text = soup.get_text(" ", strip=True)
     words = text.split()
     rows.append(("Visible words", str(len(words))))
@@ -202,6 +204,45 @@ def analyze_soup(soup, page_url, html):
     for index, (word, count) in enumerate(top_words(text), 1):
         rows.append(("Top word " + str(index), word + " (" + str(count) + " times)"))
     rows.extend(find_contacts(html, hrefs))
+    return rows
+
+
+def login_form_rows(forms):
+    rows = []
+    logins = []
+    for form in forms:
+        inputs = form.find_all("input")
+        types = [(tag.get("type", "text") or "text").lower() for tag in inputs]
+        names = " ".join((tag.get("name", "") or "") for tag in inputs).lower()
+        if "password" in types and ("text" in types or "email" in types or "user" in names or "login" in names):
+            logins.append(form.get("action", "") or "(same page)")
+    rows.append(("Login forms", str(len(logins))))
+    for index, action in enumerate(logins[:3], 1):
+        rows.append(("Login form " + str(index), short(action, 160)))
+    return rows
+
+
+def jsonld_rows(soup):
+    import json
+    rows = []
+    blocks = soup.find_all("script", {"type": "application/ld+json"})
+    rows.append(("JSON-LD blocks", str(len(blocks))))
+    types = []
+    for block in blocks:
+        try:
+            data = json.loads(block.string or "")
+        except Exception:
+            continue
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("@graph", [data]) if isinstance(data.get("@graph"), list) else [data]
+        for item in items:
+            if isinstance(item, dict) and item.get("@type") and item["@type"] not in types:
+                types.append(str(item["@type"]))
+    if types:
+        rows.append(("Schema types", ", ".join(types[:10])))
     return rows
 
 
@@ -648,6 +689,80 @@ def detect_tech(html, headers, cookies, metas):
         add("jsDelivr", "Script CDN referenced in page")
     if "unpkg.com" in low:
         add("UNPKG", "Script CDN referenced in page")
+    if "solid-js" in low or "solidjs" in low:
+        add("SolidJS", "Library marker found in page")
+    if "preact" in low:
+        add("Preact", "Library marker found in page")
+    if "lit-element" in low or "lit-html" in low:
+        add("Lit", "Library marker found in page")
+    if "@remix-run" in low:
+        add("Remix", "Framework marker found in page")
+    if "astro-" in low:
+        add("Astro", "Framework marker found in page")
+    if "gatsby-" in low:
+        add("Gatsby", "Framework marker found in page")
+    if "/load.php" in low or "mediawiki" in low:
+        add("MediaWiki", "Wiki marker found in page")
+    if "phpbb" in low:
+        add("phpBB", "Forum marker found in page")
+    if "vbulletin" in low:
+        add("vBulletin", "Forum marker found in page")
+    if "discourse" in low:
+        add("Discourse", "Forum marker found in page")
+    if "nodebb" in low:
+        add("NodeBB", "Forum marker found in page")
+    if "flarum" in low:
+        add("Flarum", "Forum marker found in page")
+    if "xenforo" in low:
+        add("XenForo", "Forum marker found in page")
+    if "mybb" in low:
+        add("MyBB", "Forum marker found in page")
+    if "data-craft" in low or "craft cms" in low:
+        add("Craft CMS", "CMS marker found in page")
+    if "expressionengine" in low:
+        add("ExpressionEngine", "CMS marker found in page")
+    if "silverstripe" in low:
+        add("SilverStripe", "CMS marker found in page")
+    if "umbraco" in low:
+        add("Umbraco", "CMS marker found in page")
+    if "kentico" in low:
+        add("Kentico", "CMS marker found in page")
+    if "sitecore" in low:
+        add("Sitecore", "CMS marker found in page")
+    if "/etc.clientlibs" in low:
+        add("Adobe AEM", "CMS marker found in page")
+    if "liferay" in low:
+        add("Liferay", "CMS marker found in page")
+    if "typo3" in low:
+        add("TYPO3", "CMS marker found in page")
+    if "concrete5" in low or "concretecms" in low:
+        add("Concrete CMS", "CMS marker found in page")
+    if "getgrav" in low:
+        add("Grav", "CMS marker found in page")
+    if "kirby" in low:
+        add("Kirby", "CMS marker found in page")
+    if "statamic" in low:
+        add("Statamic", "CMS marker found in page")
+    if "octobercms" in low:
+        add("OctoberCMS", "CMS marker found in page")
+    if "processwire" in low:
+        add("ProcessWire", "CMS marker found in page")
+    if "opencart" in low:
+        add("OpenCart", "Store platform marker found")
+    if "shopware" in low:
+        add("Shopware", "Store platform marker found")
+    if "saleor" in low:
+        add("Saleor", "Store platform marker found")
+    if "nopcommerce" in low:
+        add("nopCommerce", "Store platform marker found")
+    if "moodle" in low:
+        add("Moodle", "LMS marker found in page")
+    if "docusaurus" in low:
+        add("Docusaurus", "Docs generator marker found")
+    if "mkdocs" in low:
+        add("MkDocs", "Docs generator marker found")
+    if "sphinxdoc" in low:
+        add("Sphinx", "Docs generator marker found")
     cookie_names = " ".join(cookie.get("name", "") for cookie in cookies)
     if "PHPSESSID" in cookie_names:
         add("PHP", "Session cookie observed")

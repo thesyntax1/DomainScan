@@ -38,14 +38,14 @@ def collect(apex, enabled=True):
     rows = []
     if not enabled:
         rows.append(("Subdomain discovery", "Skipped (disabled in options)"))
-        return {"rows": rows}
+        return {"rows": rows, "confirmed": {}}
     if not apex or "." not in apex:
         rows.append(("Subdomain discovery", "Requires a domain name"))
-        return {"rows": rows}
+        return {"rows": rows, "confirmed": {}}
     rows.append(("Subdomain target", apex))
     if not dns_check.HAS_DNSPYTHON:
         rows.append(("Subdomain discovery", "Limited (dnspython not installed)"))
-        return {"rows": rows}
+        return {"rows": rows, "confirmed": {}}
     resolver = dns_check.make_resolver()
     wildcard, wildcard_ips = detect_wildcard(resolver, apex)
     if wildcard:
@@ -92,7 +92,7 @@ def collect(apex, enabled=True):
     if unresolved > 0:
         rows.append(("Unresolved names", str(unresolved) + " (seen in records but no A answer)"))
     rows.extend(check_takeover(resolver, sorted(confirmed)[:40]))
-    return {"rows": rows}
+    return {"rows": rows, "confirmed": confirmed}
 
 
 def detect_wildcard(resolver, apex):
@@ -274,3 +274,53 @@ def parse_hostsearch(text):
             continue
         names.add(host)
     return names
+
+
+def extract_title(html):
+    import re
+    match = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.IGNORECASE | re.DOTALL)
+    if match:
+        return short(re.sub(r"\s+", " ", match.group(1).strip()), 120)
+    return ""
+
+
+def fetch_subdomain_page(url, timeout=8):
+    import requests
+    response = requests.get(url, timeout=timeout, headers={"User-Agent": BROWSER_UA}, allow_redirects=True)
+    return {
+        "status": response.status_code,
+        "server": response.headers.get("Server", ""),
+        "title": extract_title(response.text or ""),
+        "url": response.url,
+    }
+
+
+def probe_web(names, limit=20, timeout=8):
+    rows = []
+    picked = sorted(names)[:limit]
+    if not picked:
+        rows.append(("Subdomain web", "No subdomains to probe"))
+        return {"rows": rows}
+
+    def fetch(name):
+        for scheme in ("https", "http"):
+            try:
+                info = fetch_subdomain_page(scheme + "://" + name + "/", timeout)
+                return (name, info)
+            except Exception:
+                continue
+        return (name, None)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(fetch, picked))
+    for name, info in sorted(results):
+        if not info:
+            rows.append((name, "No HTTP(S) response"))
+            continue
+        detail = "HTTP " + str(info["status"])
+        if info["server"]:
+            detail = detail + ", " + short(info["server"], 80)
+        if info["title"]:
+            detail = detail + ", " + info["title"]
+        rows.append((name, detail))
+    return {"rows": rows}
