@@ -33,6 +33,7 @@ def make_resolver():
     resolver = dns.resolver.Resolver()
     resolver.timeout = 3.0
     resolver.lifetime = 8.0
+    resolver.rotate = True
     return resolver
 
 
@@ -44,7 +45,10 @@ def query(resolver, name, rtype):
     except dns.resolver.NoAnswer:
         return {"records": [], "ttl": 0, "error": "NoAnswer"}
     except dns.exception.Timeout:
-        return {"records": [], "ttl": 0, "error": "Timeout"}
+        try:
+            answer = resolver.resolve(name, rtype, tcp=True)
+        except Exception as exc:
+            return {"records": [], "ttl": 0, "error": exc.__class__.__name__}
     except Exception as exc:
         return {"records": [], "ttl": 0, "error": exc.__class__.__name__}
     try:
@@ -653,7 +657,7 @@ def version_query(ns_ip, timeout=4):
 def compare_resolvers(host, system_a):
     rows = []
     system_set = set(system_a or [])
-    for ip in ("1.1.1.1", "8.8.8.8"):
+    for ip in ("1.1.1.1", "8.8.8.8", "9.9.9.9", "208.67.222.222", "94.140.14.14"):
         try:
             custom = dns.resolver.Resolver(configure=False)
             custom.nameservers = [ip]
@@ -679,6 +683,11 @@ def compare_resolvers(host, system_a):
         rows.append(("Resolver agreement", "Resolvers disagree (CDN or geo-DNS likely)"))
     else:
         rows.append(("Resolver agreement", "Public resolvers unreachable"))
+    distinct = {frozenset(item) for item in others}
+    if len(distinct) > 1:
+        rows.append(("Propagation", str(len(distinct)) + " distinct answers across resolvers"))
+    elif others:
+        rows.append(("Propagation", "Consistent everywhere"))
     return rows
 
 

@@ -71,6 +71,7 @@ def collect(page_url, html, timeout=8, max_files=6):
     rows.extend(storage_rows(texts))
     rows.extend(debug_rows(texts))
     rows.extend(endpoint_key_rows(endpoints))
+    rows.extend(jwt_rows(texts))
     rows.extend(sourcemap_rows(session, texts, timeout))
     return {"rows": rows}
 
@@ -216,15 +217,42 @@ def endpoint_key_rows(endpoints):
     return rows
 
 
+def jwt_rows(texts):
+    import base64
+    import json
+    rows = []
+    blob = " ".join(body or "" for _, body in texts)
+    tokens = set(re.findall(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", blob))
+    if not tokens:
+        rows.append(("Hardcoded JWTs", "None spotted"))
+        return rows
+    rows.append(("Hardcoded JWTs", str(len(tokens)) + " embedded tokens (verify they are not live secrets)"))
+    for token in sorted(tokens)[:3]:
+        try:
+            payload = token.split(".")[1]
+            payload = payload + "=" * (-len(payload) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore"))
+            claims = ", ".join(sorted(str(key) for key in data.keys())[:6])
+            rows.append(("JWT claims", short(claims, 160)))
+            if str(data.get("alg", "")).lower() == "none":
+                rows.append(("JWT algorithm", "none (unsigned, critical)"))
+        except Exception:
+            continue
+    return rows
+
+
 def danger_rows(texts):
     rows = []
     blob = " ".join(body or "" for _, body in texts)
     counts = {
         "eval() calls": blob.count("eval("),
+        "Function() constructors": len(re.findall(r"\bnew\s+Function\s*\(", blob)),
         "document.write": blob.count("document.write"),
         "innerHTML writes": blob.count(".innerHTML=") + blob.count(".innerHTML ="),
         "outerHTML writes": blob.count(".outerHTML=") + blob.count(".outerHTML ="),
         "setTimeout strings": blob.count("setTimeout(" + chr(34)) + blob.count("setTimeout(" + chr(39)),
+        "setInterval strings": blob.count("setInterval(" + chr(34)) + blob.count("setInterval(" + chr(39)),
+        "merge/extend calls": len(re.findall(r"\b(Object\.assign|_.merge|mergeDeep|deepmerge)\s*\(", blob)) + blob.count("$.extend("),
     }
     total = sum(counts.values())
     rows.append(("Dangerous sinks", str(total)))

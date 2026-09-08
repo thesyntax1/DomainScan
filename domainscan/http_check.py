@@ -501,7 +501,76 @@ def collect_tls(host, port=443):
     rows.extend(ocsp_stapling(host, port))
     rows.extend(session_reuse(host, port))
     rows.extend(weak_cipher_probe(host, port))
+    rows.extend(accepted_cipher_rows(host, port))
     return {"rows": rows}
+
+
+CIPHER_PROBES = [
+    ("AES-128-GCM", "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:AES128-GCM-SHA256"),
+    ("AES-256-GCM", "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:AES256-GCM-SHA384"),
+    ("ChaCha20", "ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-CHACHA20-POLY1305"),
+    ("AES-CBC", "ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:AES128-SHA"),
+    ("3DES", "DES-CBC3-SHA"),
+    ("RC4", "RC4-SHA:RC4-MD5"),
+    ("No forward secrecy", "AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA"),
+]
+
+
+def accepted_cipher_rows(host, port=443, timeout=6):
+    rows = []
+    accepted = []
+    for label, ciphers in CIPHER_PROBES:
+        name = try_cipher_group(host, port, ciphers, timeout)
+        if name:
+            accepted.append((label, name))
+    if not accepted:
+        rows.append(("Cipher groups", "No probe handshake succeeded"))
+        return rows
+    rows.append(("Cipher groups accepted", str(len(accepted)) + " of " + str(len(CIPHER_PROBES))))
+    for label, name in accepted:
+        detail = name
+        if label in ("3DES", "RC4"):
+            detail = detail + " (weak, disable)"
+        elif label == "AES-CBC":
+            detail = detail + " (legacy, prefer GCM)"
+        elif label == "No forward secrecy":
+            detail = detail + " (no PFS, deprefer)"
+        rows.append(("Accepts " + label, detail))
+    weak = [label for label, _ in accepted if label in ("3DES", "RC4")]
+    if weak:
+        rows.append(("Cipher verdict", "Weak groups accepted: " + ", ".join(weak)))
+    else:
+        rows.append(("Cipher verdict", "Only strong groups accepted"))
+    return rows
+
+
+def try_cipher_group(host, port, ciphers, timeout):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        context.set_ciphers(ciphers)
+    except Exception:
+        return ""
+    try:
+        raw = socket.create_connection((host, port), timeout=timeout)
+    except Exception:
+        return ""
+    try:
+        sock = context.wrap_socket(raw, server_hostname=host)
+    except Exception:
+        try:
+            raw.close()
+        except Exception:
+            pass
+        return ""
+    try:
+        cipher = sock.cipher()
+        name = cipher[0] if cipher else ""
+        sock.close()
+    except Exception:
+        return ""
+    return name or ""
 
 
 def probe_tls_version(host, port, minimum, maximum):

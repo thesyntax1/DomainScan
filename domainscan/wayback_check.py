@@ -1,6 +1,6 @@
 import urllib.parse
 
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, fetch_json, short
 
 
 def collect(host, timeout=10, current_html=""):
@@ -24,7 +24,6 @@ def collect(host, timeout=10, current_html=""):
 
 
 def homepage_diff_rows(host, current_html, timeout):
-    import re
     import requests
     rows = []
     params = {
@@ -35,8 +34,7 @@ def homepage_diff_rows(host, current_html, timeout):
         "limit": 1,
     }
     try:
-        response = requests.get("https://web.archive.org/cdx/search/cdx", params=params, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-        data = response.json()
+        data = fetch_json("https://web.archive.org/cdx/search/cdx", params=params, timeout=timeout)
     except Exception:
         return rows
     if not data or len(data) < 2:
@@ -87,7 +85,6 @@ def drift_verdict(old_html, new_html):
 
 
 def subdomain_rows(host, timeout):
-    import requests
     rows = []
     params = {
         "url": host,
@@ -98,9 +95,7 @@ def subdomain_rows(host, timeout):
         "limit": 2000,
     }
     try:
-        response = requests.get("https://web.archive.org/cdx/search/cdx", params=params, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
+        data = fetch_json("https://web.archive.org/cdx/search/cdx", params=params, timeout=timeout)
     except Exception:
         return rows
     if not data or len(data) < 2:
@@ -120,7 +115,6 @@ def subdomain_rows(host, timeout):
 
 
 def fetch_cdx(host, timeout):
-    import requests
     params = {
         "url": host + "/*",
         "output": "json",
@@ -129,10 +123,7 @@ def fetch_cdx(host, timeout):
         "collapse": "urlkey",
         "limit": 500,
     }
-    headers = {"User-Agent": BROWSER_UA}
-    response = requests.get("https://web.archive.org/cdx/search/cdx", params=params, headers=headers, timeout=timeout)
-    response.raise_for_status()
-    data = response.json()
+    data = fetch_json("https://web.archive.org/cdx/search/cdx", params=params, timeout=timeout)
     if not data or len(data) < 2:
         return []
     return data[1:]

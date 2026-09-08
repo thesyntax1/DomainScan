@@ -29,6 +29,10 @@ def collect(base_url, timeout=10):
         parsed = parse_sitemap(sitemap)
     rows.extend(parsed["rows"])
     sitemap_urls = parsed["urls"]
+    if parsed.get("is_index") and parsed["urls"]:
+        child = follow_sitemap_index(session, parsed["urls"], timeout)
+        rows.extend(child["rows"])
+        sitemap_urls = child["urls"] or sitemap_urls
     security = fetch(session, base_url + "/.well-known/security.txt", timeout)
     if not security["ok"]:
         fallback = fetch(session, base_url + "/security.txt", timeout)
@@ -123,6 +127,15 @@ def parse_ads(result):
             sellers.add(bits[0].lower())
     if sellers:
         rows.append(("ads.txt sellers", str(len(sellers)) + " distinct systems"))
+    malformed = 0
+    for line in entries:
+        bits = [bit.strip() for bit in line.split(",")]
+        if len(bits) < 3 or not bits[0] or not bits[1] or bits[2].upper() not in ("DIRECT", "RESELLER"):
+            malformed += 1
+    if malformed:
+        rows.append(("ads.txt malformed", str(malformed) + " lines fail the domain,account,type format"))
+    else:
+        rows.append(("ads.txt format", "All entries well-formed"))
     for line in variables[:4]:
         rows.append(("ads.txt variable", short(line, 160)))
     return rows
@@ -317,15 +330,36 @@ def find_interesting_disallows(disallows):
     return found
 
 
+def follow_sitemap_index(session, locations, timeout, cap=3):
+    rows = []
+    urls = []
+    total = 0
+    for target in locations[:cap]:
+        try:
+            child = fetch(session, target, timeout)
+        except Exception:
+            continue
+        if not child["ok"]:
+            continue
+        parsed = parse_sitemap(child, "sitemap child")
+        child_urls = [url for url in parsed["urls"] if url != target]
+        total += len(child_urls)
+        urls.extend(child_urls[:200])
+    rows.append(("Sitemap children followed", str(min(len(locations), cap)) + " of " + str(len(locations))))
+    rows.append(("Child URL total", str(total)))
+    return {"rows": rows, "urls": urls}
+
+
 def parse_sitemap(result, label="sitemap.xml"):
     rows = []
     if not result["ok"]:
         rows.append((label, describe_missing(result)))
-        return {"rows": rows, "urls": []}
+        return {"rows": rows, "urls": [], "is_index": False}
     locations = re.findall(r"<loc>(.*?)</loc>", result["text"], re.IGNORECASE | re.DOTALL)
     locations = [re.sub(r"\s+", "", item) for item in locations if item.strip()]
     rows.append((label, "Present (" + str(result["size"]) + " bytes)"))
-    if "<sitemapindex" in result["text"].lower():
+    is_index = "<sitemapindex" in result["text"].lower()
+    if is_index:
         rows.append(("Sitemap type", "Index of sitemaps"))
     else:
         rows.append(("Sitemap type", "URL set"))
@@ -337,7 +371,7 @@ def parse_sitemap(result, label="sitemap.xml"):
     if stamps:
         rows.append(("Sitemap lastmod", str(len(stamps)) + " dated, oldest " + stamps[0][:10] + ", newest " + stamps[-1][:10]))
         rows.append(("Sitemap freshness", sitemap_freshness(stamps[-1][:10])))
-    return {"rows": rows, "urls": locations}
+    return {"rows": rows, "urls": locations, "is_index": is_index}
 
 
 def sitemap_freshness(newest):

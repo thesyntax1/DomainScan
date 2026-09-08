@@ -1,6 +1,6 @@
 import datetime
 
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, fetch_json, short
 
 
 def collect(apex, timeout=12):
@@ -27,13 +27,9 @@ def collect(apex, timeout=12):
 
 
 def fetch_certspotter(apex, timeout):
-    import requests
     url = "https://api.certspotter.com/v1/issuances"
     params = {"domain": apex, "expand": "dns_names,issuer"}
-    headers = {"User-Agent": BROWSER_UA}
-    response = requests.get(url, params=params, headers=headers, timeout=timeout)
-    response.raise_for_status()
-    return response.json() or []
+    return fetch_json(url, params=params, timeout=timeout) or []
 
 
 def spotter_rows(issuances, apex):
@@ -61,12 +57,8 @@ def spotter_rows(issuances, apex):
 
 
 def fetch_crtsh(apex, timeout):
-    import requests
     url = "https://crt.sh/?q=%25." + apex + "&output=json"
-    headers = {"User-Agent": BROWSER_UA}
-    response = requests.get(url, headers=headers, timeout=timeout)
-    response.raise_for_status()
-    data = response.json()
+    data = fetch_json(url, timeout=timeout)
     if isinstance(data, dict) and data.get("error"):
         return []
     return data or []

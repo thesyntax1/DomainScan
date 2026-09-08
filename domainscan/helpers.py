@@ -150,6 +150,43 @@ def now_utc():
     return moment.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def fetch_json(url, params=None, data=None, json_body=None, headers=None, timeout=10, tries=3, method="GET"):
+    import time
+    import requests
+    sane_headers = headers or {"User-Agent": BROWSER_UA}
+    last = RuntimeError("request failed")
+    for attempt in range(max(tries, 1)):
+        try:
+            if method == "POST":
+                response = requests.post(url, params=params, data=data, json=json_body, headers=sane_headers, timeout=timeout)
+            else:
+                response = requests.get(url, params=params, headers=sane_headers, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            last = exc
+            if attempt < max(tries, 1) - 1:
+                time.sleep(1 + attempt)
+    raise last
+
+
+def fetch_text(url, params=None, headers=None, timeout=10, tries=3):
+    import time
+    import requests
+    sane_headers = headers or {"User-Agent": BROWSER_UA}
+    last = RuntimeError("request failed")
+    for attempt in range(max(tries, 1)):
+        try:
+            response = requests.get(url, params=params, headers=sane_headers, timeout=timeout)
+            response.raise_for_status()
+            return response.text or ""
+        except Exception as exc:
+            last = exc
+            if attempt < max(tries, 1) - 1:
+                time.sleep(1 + attempt)
+    raise last
+
+
 def export_json(path, result):
     import json
     data = {

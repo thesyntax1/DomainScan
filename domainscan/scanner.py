@@ -8,8 +8,14 @@ from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, 
 def safe_run(func):
     try:
         return func()
-    except Exception as exc:
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError) as exc:
         return {"rows": [("Status", "Check failed (" + exc.__class__.__name__ + ": " + helpers.short(str(exc), 160) + ")")]}
+    except Exception as exc:
+        time.sleep(1)
+        try:
+            return func()
+        except Exception as retry_exc:
+            return {"rows": [("Status", "Check failed (" + retry_exc.__class__.__name__ + ": " + helpers.short(str(retry_exc), 160) + ")")]}
 
 
 def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomains=True, timeout=12, crawl_pages=15, js_files=6, subdomain_web=20, include_recon=True):

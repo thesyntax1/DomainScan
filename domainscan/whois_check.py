@@ -301,6 +301,11 @@ def parse_rdap(data):
     rows.extend(contact_rows)
     if not contact_rows:
         rows.append(("Registrant contact", "Redacted for privacy or not disclosed"))
+    abuse = [(key, value) for key, value in contact_rows if "abuse" in key.lower() and ("email" in key.lower() or "phone" in key.lower())]
+    if abuse:
+        rows.append(("Abuse contact", "; ".join(value for _, value in abuse[:2])))
+    else:
+        rows.append(("Abuse contact", "Not published in RDAP"))
     return rows
 
 

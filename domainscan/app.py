@@ -455,6 +455,10 @@ class DomainScanApp:
             messagebox.showinfo("No previous scans", "No earlier scan found for " + host + ".")
             return
         changes = history_store.diff_runs(previous, self.result)
+        try:
+            changes = changes + history_store.trend_rows(host, self.result)
+        except Exception:
+            pass
         self.show_changes(changes, "Compared with scan from " + str(previous["meta"].get("scanned_at", "earlier")) + ".")
 
     def show_changes(self, changes, detail):

@@ -55,6 +55,31 @@ def collect(html, page_url, headers, cookies):
     return {"rows": rows, "tech": tech_rows}
 
 
+def generator_version_rows(generator):
+    rows = []
+    if not generator:
+        return rows
+    disclosed = []
+    for product, pattern in (
+        ("WordPress", r"WordPress\s+(\d+\.\d+(?:\.\d+)?)"),
+        ("Joomla", r"Joomla!?\s+(\d+\.\d+(?:\.\d+)?)"),
+        ("Drupal", r"Drupal\s+(\d+(?:\.\d+)?)"),
+        ("TYPO3", r"TYPO3\s+(\d+\.[\d.]+)"),
+        ("Ghost", r"Ghost\s+(\d+\.[\d.]+)"),
+        ("Hugo", r"Hugo\s+([\d.]+)"),
+        ("Next.js", r"Next\.js\s+([\d.]+)"),
+        ("Gatsby", r"Gatsby\s+([\d.]+)"),
+    ):
+        version = extract_version(generator, pattern)
+        if version:
+            disclosed.append(product + " " + version)
+    if disclosed:
+        rows.append(("Exact versions disclosed", "; ".join(disclosed)))
+    elif re.search(r"\d+\.\d+", generator):
+        rows.append(("Version disclosure", "Generator advertises a version: " + short(generator, 120)))
+    return rows
+
+
 def meta_dict(soup):
     metas = {}
     for tag in soup.find_all("meta"):
@@ -118,6 +143,8 @@ def analyze_soup(soup, page_url, html):
     for key, label in wanted:
         if metas.get(key):
             rows.append((label, short(metas[key], 220)))
+    rows.extend(generator_version_rows(metas.get("generator", "")))
+    rows.extend(contrast_rows(soup, html))
     for level in ("h1", "h2", "h3", "h4", "h5", "h6"):
         rows.append((level.upper() + " count", str(len(soup.find_all(level)))))
     first_h1 = soup.find("h1")
@@ -1396,3 +1423,75 @@ def detect_tech(html, headers, cookies, metas):
     if "sanity.io" in low:
         add("Sanity", "CMS marker found")
     return found
+
+
+def parse_hex_color(text):
+    match = re.search(r"#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\b", text or "")
+    if not match:
+        return None
+    digits = match.group(1)
+    if len(digits) == 3:
+        digits = "".join(ch * 2 for ch in digits)
+    try:
+        return (int(digits[0:2], 16), int(digits[2:4], 16), int(digits[4:6], 16))
+    except ValueError:
+        return None
+
+
+def relative_luminance(rgb):
+    def channel(value):
+        part = value / 255.0
+        if part <= 0.03928:
+            return part / 12.92
+        return ((part + 0.055) / 1.055) ** 2.4
+    red, green, blue = rgb
+    return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+
+
+def contrast_ratio(first, second):
+    light = relative_luminance(first)
+    dark = relative_luminance(second)
+    if light < dark:
+        light, dark = dark, light
+    return (light + 0.05) / (dark + 0.05)
+
+
+def contrast_rows(soup, html):
+    rows = []
+    pairs = []
+    for tag in soup.find_all(style=True):
+        style = tag.get("style", "") or ""
+        fore = None
+        back = None
+        for chunk in style.split(";"):
+            name, _, value = chunk.partition(":")
+            name = name.strip().lower()
+            if name == "color":
+                fore = parse_hex_color(value)
+            elif name in ("background", "background-color"):
+                back = parse_hex_color(value)
+        if fore and back:
+            pairs.append((fore, back))
+    for block in re.findall(r"\{([^{}]{1,500})\}", html or ""):
+        fore = None
+        back = None
+        for chunk in block.split(";"):
+            name, _, value = chunk.partition(":")
+            name = name.strip().lower()
+            if name == "color":
+                fore = parse_hex_color(value)
+            elif name in ("background", "background-color"):
+                back = parse_hex_color(value)
+        if fore and back:
+            pairs.append((fore, back))
+    if not pairs:
+        rows.append(("Color contrast pairs", "No inline or stylesheet color pairs found"))
+        return rows
+    ratios = [contrast_ratio(fore, back) for fore, back in pairs]
+    failing = sum(1 for ratio in ratios if ratio < 4.5)
+    rows.append(("Color contrast pairs", str(len(ratios)) + " checked, worst " + str(round(min(ratios), 2)) + ":1"))
+    if failing:
+        rows.append(("Low-contrast pairs", str(failing) + " below WCAG AA 4.5:1"))
+    else:
+        rows.append(("Contrast verdict", "All pairs pass WCAG AA 4.5:1"))
+    return rows

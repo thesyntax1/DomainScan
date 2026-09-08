@@ -106,6 +106,7 @@ def describe_mx(records, resolver=None):
         if index == 1:
             rows.extend(smtp_tls_cert_rows(target))
             rows.extend(smtp_vrfy_rows(target))
+            rows.extend(smtp_relay_rows(target))
         if resolver is not None and index <= 3:
             rows.append(("MX " + str(index) + " DANE", dane_status(resolver, target)))
     return rows
@@ -345,6 +346,53 @@ def vrfy_verdict(reply, command):
     if code:
         return command + " answered " + code
     return command + " gave no answer"
+
+
+def smtp_relay_rows(target):
+    rows = []
+    try:
+        sock = socket.create_connection((target, 25), timeout=6)
+    except Exception:
+        return rows
+    try:
+        banner = read_smtp(sock)
+        if not banner.startswith("220"):
+            return rows
+        sock.sendall(b"EHLO domainscan\r\n")
+        read_smtp(sock)
+        sock.sendall(b"MAIL FROM:<probe@invalid>\r\n")
+        mail_reply = read_smtp(sock)
+        if not mail_reply.startswith("250"):
+            return rows
+        sock.sendall(b"RCPT TO:<relaytest@invalid>\r\n")
+        rcpt_reply = read_smtp(sock)
+        try:
+            sock.sendall(b"RSET\r\n")
+            read_smtp(sock)
+            sock.sendall(b"QUIT\r\n")
+        except Exception:
+            pass
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return rows
+    try:
+        sock.close()
+    except Exception:
+        pass
+    code = rcpt_reply.splitlines()
+    code = code[0][:3] if code else ""
+    if code == "250":
+        rows.append(("MX 1 relay", "ACCEPTS relay to outside domains (open relay, critical)"))
+    elif code in ("550", "551", "552", "553", "554", "451", "452"):
+        rows.append(("MX 1 relay", "Refused outside relay (" + code + ", good)"))
+    elif code:
+        rows.append(("MX 1 relay", "Answered " + code + " (verify manually)"))
+    else:
+        rows.append(("MX 1 relay", "No answer to relay probe"))
+    return rows
 
 
 def smtp_starttls(target, port=25):

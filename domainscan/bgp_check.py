@@ -1,4 +1,4 @@
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, fetch_json, short
 
 
 def collect(ips):
@@ -55,10 +55,8 @@ def asn_enrichment(asn):
 
 
 def fetch_peeringdb(asn):
-    import requests
     try:
-        response = requests.get("https://www.peeringdb.com/api/net.json?asn=" + str(asn), timeout=10, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json("https://www.peeringdb.com/api/net.json?asn=" + str(asn), timeout=10)
     except Exception:
         return None
     entries = data.get("data", []) or []
@@ -96,11 +94,9 @@ def asn_rdap_rows(asn):
 
 
 def prefix_rows(prefix, ip):
-    import requests
     rows = []
     try:
-        response = requests.get("https://api.bgpview.io/prefix/" + prefix, timeout=10, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json("https://api.bgpview.io/prefix/" + prefix, timeout=10)
     except Exception:
         return rows
     if data.get("status") != "ok":
@@ -114,11 +110,9 @@ def prefix_rows(prefix, ip):
 
 
 def rpki_rows(asn, prefix, ip):
-    import requests
     rows = []
     try:
-        response = requests.get("https://rpki.cloudflare.com/api/v1/validity/" + str(asn) + "/" + prefix, timeout=10, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json("https://rpki.cloudflare.com/api/v1/validity/" + str(asn) + "/" + prefix, timeout=10)
     except Exception:
         return rows
     validity = (data.get("validity", {}) or {}).get("state", "")
@@ -132,10 +126,8 @@ def rpki_rows(asn, prefix, ip):
 
 
 def fetch_ip_info(ip):
-    import requests
     try:
-        response = requests.get("https://api.bgpview.io/ip/" + ip, timeout=10, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json("https://api.bgpview.io/ip/" + ip, timeout=10)
     except Exception:
         return None
     if data.get("status") != "ok":
@@ -184,10 +176,8 @@ def prefix_size(prefix):
 
 
 def fetch_asn_info(asn):
-    import requests
     try:
-        response = requests.get("https://api.bgpview.io/asn/" + str(asn), timeout=10, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json("https://api.bgpview.io/asn/" + str(asn), timeout=10)
     except Exception:
         return None
     if data.get("status") != "ok":
@@ -204,10 +194,8 @@ def parse_asn_info(detail, asn, rows):
 
 
 def fetch_asn_peers(asn):
-    import requests
     try:
-        response = requests.get("https://api.bgpview.io/asn/" + str(asn) + "/peers", timeout=10, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json("https://api.bgpview.io/asn/" + str(asn) + "/peers", timeout=10)
     except Exception:
         return None
     if data.get("status") != "ok":

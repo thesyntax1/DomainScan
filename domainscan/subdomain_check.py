@@ -3,7 +3,7 @@ import string
 from concurrent.futures import ThreadPoolExecutor
 
 from domainscan import dns_check
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, fetch_json, fetch_text, short
 
 
 WORDLIST = [
@@ -114,11 +114,16 @@ def collect(apex, enabled=True):
         rows.append(("AnubisDB", "Lookup failed"))
     else:
         rows.append(("AnubisDB names", str(len(anubis_names))))
+    rapid_names = fetch_rapiddns(apex)
+    if rapid_names is None:
+        rows.append(("RapidDNS", "Lookup failed"))
+    else:
+        rows.append(("RapidDNS names", str(len(rapid_names))))
     brute = brute_force(resolver, apex, wildcard_ips)
     rows.append(("Brute-force names tried", str(len(WORDLIST))))
     rows.append(("Brute-force hits", str(len(brute))))
     combined = set(brute)
-    for names in (crt_names, sonar_names or set(), ht_names or set(), tm_names or set(), us_names or set(), cs_names or set(), otx_names or set(), anubis_names or set()):
+    for names in (crt_names, sonar_names or set(), ht_names or set(), tm_names or set(), us_names or set(), cs_names or set(), otx_names or set(), anubis_names or set(), rapid_names or set()):
         for name in names:
             if name == apex or name.endswith("." + apex):
                 combined.add(name)
@@ -373,12 +378,9 @@ def takeover_http_verify(names):
 
 
 def fetch_crt(apex):
-    import requests
     try:
         url = "https://crt.sh/?q=%25." + apex + "&output=json"
-        response = requests.get(url, timeout=15, headers={"User-Agent": BROWSER_UA})
-        response.raise_for_status()
-        entries = response.json()
+        entries = fetch_json(url, timeout=15)
     except Exception:
         return -1, set(), 0
     return parse_crt(entries)
@@ -403,12 +405,9 @@ def parse_crt(entries):
 
 
 def fetch_sonar(apex):
-    import requests
     try:
         url = "https://sonar.omnisint.io/subdomains/" + apex
-        response = requests.get(url, timeout=10, headers={"User-Agent": BROWSER_UA})
-        response.raise_for_status()
-        data = response.json()
+        data = fetch_json(url, timeout=10)
     except Exception:
         return None
     return parse_sonar(data)
@@ -424,23 +423,18 @@ def parse_sonar(data):
 
 
 def fetch_hackertarget(apex):
-    import requests
     try:
         url = "https://api.hackertarget.com/hostsearch/"
-        response = requests.get(url, params={"q": apex}, timeout=10, headers={"User-Agent": BROWSER_UA})
-        response.raise_for_status()
-        text = response.text
+        text = fetch_text(url, params={"q": apex}, timeout=10)
     except Exception:
         return None
     return parse_hostsearch(text)
 
 
 def fetch_threatminer(apex):
-    import requests
     try:
         url = "https://api.threatminer.org/v2/domain.php"
-        response = requests.get(url, params={"q": apex, "rt": "5"}, timeout=10, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json(url, params={"q": apex, "rt": "5"}, timeout=10)
     except Exception:
         return None
     if str(data.get("status_code", "")) != "200":
@@ -454,12 +448,10 @@ def fetch_threatminer(apex):
 
 
 def fetch_urlscan_names(apex):
-    import requests
     import urllib.parse
     try:
         url = "https://urlscan.io/api/v1/search/"
-        response = requests.get(url, params={"q": "domain:" + apex, "size": 100}, timeout=12, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json(url, params={"q": "domain:" + apex, "size": 100}, timeout=12)
     except Exception:
         return None
     names = set()
@@ -478,12 +470,10 @@ def fetch_urlscan_names(apex):
 
 
 def fetch_certspotter(apex):
-    import requests
     try:
         url = "https://api.certspotter.com/v1/issuances"
         params = {"domain": apex, "expand": "dns_names"}
-        response = requests.get(url, params=params, timeout=12, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json(url, params=params, timeout=12)
     except Exception:
         return None
     names = set()
@@ -496,12 +486,10 @@ def fetch_certspotter(apex):
 
 
 def fetch_otx(apex):
-    import requests
     names = set()
     url = "https://otx.alienvault.com/api/v1/indicators/domain/" + apex + "/passive_dns"
     try:
-        response = requests.get(url, timeout=12, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json(url, timeout=12)
     except Exception:
         return None
     for item in data.get("passive_dns", []) or []:
@@ -512,16 +500,28 @@ def fetch_otx(apex):
 
 
 def fetch_anubis(apex):
-    import requests
     try:
-        response = requests.get("https://jldc.me/anubis/subdomains/" + apex, timeout=12, headers={"User-Agent": BROWSER_UA})
-        data = response.json()
+        data = fetch_json("https://jldc.me/anubis/subdomains/" + apex, timeout=12)
     except Exception:
         return None
     names = set()
     for entry in data or []:
         host = str(entry or "").strip().lower().rstrip(".")
         if host and (host == apex or host.endswith("." + apex)):
+            names.add(host)
+    return names
+
+
+def fetch_rapiddns(apex):
+    import re
+    try:
+        html = fetch_text("https://rapiddns.io/subdomain/" + apex + "?full=1", timeout=12)
+    except Exception:
+        return None
+    names = set()
+    for cell in re.findall(r"<td>([^<>]{1,120})</td>", html or "", re.IGNORECASE):
+        host = cell.strip().lower().rstrip(".")
+        if host and (host == apex or host.endswith("." + apex)) and " " not in host:
             names.add(host)
     return names
 

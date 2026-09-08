@@ -20,7 +20,7 @@ def collect(html, page_url, headers=None, timeout=8):
     rows.extend(canonical_rows(soup, page_url, timeout))
     rows.extend(title_h1_rows(soup))
     rows.extend(discovery_rows(soup))
-    rows.extend(hreflang_rows(soup, timeout))
+    rows.extend(hreflang_rows(soup, timeout, page_url))
     rows.extend(social_tag_rows(soup, timeout))
     rows.extend(heading_rows(soup))
     rows.extend(technical_rows(soup, page_url, headers or {}, html, timeout))
@@ -190,7 +190,15 @@ def canonical_chain_rows(url, timeout):
     return rows
 
 
-def hreflang_rows(soup, timeout):
+def valid_lang_code(code):
+    import re
+    clean = (code or "").strip()
+    if clean.lower() == "x-default":
+        return True
+    return bool(re.match(r"^[a-zA-Z]{2,3}(-[a-zA-Z]{2,4})?(-[a-zA-Z0-9]{2,8})?$", clean))
+
+
+def hreflang_rows(soup, timeout, page_url=""):
     rows = []
     links = soup.find_all("link", attrs={"hreflang": True})
     rows.append(("Hreflang tags", str(len(links))))
@@ -202,6 +210,15 @@ def hreflang_rows(soup, timeout):
         if code and code not in langs:
             langs.append(code)
     rows.append(("Hreflang languages", ", ".join(langs[:12])))
+    bad = [code for code in langs if not valid_lang_code(code)]
+    if bad:
+        rows.append(("Hreflang invalid codes", ", ".join(bad[:5]) + " (not BCP 47)"))
+    if page_url:
+        self_refs = [link for link in links if (link.get("href", "") or "").strip().rstrip("/") == page_url.rstrip("/")]
+        if self_refs:
+            rows.append(("Hreflang self-reference", "Present (" + str(self_refs[0].get("hreflang", "")) + ")"))
+        else:
+            rows.append(("Hreflang self-reference", "Missing (page should list itself)"))
     if "x-default" in [code.lower() for code in langs]:
         rows.append(("Hreflang default", "x-default present"))
     else:

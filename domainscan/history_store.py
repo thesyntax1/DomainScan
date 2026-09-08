@@ -116,3 +116,35 @@ def diff_runs(old, new, cap=200):
     if not total:
         rows.append(("Result", "No differences"))
     return rows
+
+
+def trend_rows(host, current, directory=None, cap=6):
+    rows = []
+    runs = []
+    for path in list_runs(host, directory)[:cap]:
+        try:
+            runs.append(load_run(path))
+        except Exception:
+            continue
+    runs = list(reversed(runs))
+    if current:
+        runs.append(current)
+    if len(runs) < 2:
+        rows.append(("Trend", "Need at least two scans to show a trend"))
+        return rows
+    series = []
+    for run in runs[-cap:]:
+        stamp = str(run.get("meta", {}).get("scanned_at", "?"))[:16]
+        count = len(flatten(run))
+        series.append((stamp, count))
+    rows.append(("Runs in trend", str(len(series))))
+    rows.append(("Findings trend", " -> ".join(str(count) for _, count in series)))
+    first = series[0][1]
+    last = series[-1][1]
+    if last > first:
+        rows.append(("Trend direction", "+" + str(last - first) + " findings since " + series[0][0]))
+    elif last < first:
+        rows.append(("Trend direction", str(last - first) + " findings since " + series[0][0]))
+    else:
+        rows.append(("Trend direction", "Stable at " + str(last) + " findings"))
+    return rows

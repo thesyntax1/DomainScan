@@ -1,4 +1,4 @@
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, fetch_json, short
 
 
 def collect(host, apex, timeout=12):
@@ -15,13 +15,11 @@ def collect(host, apex, timeout=12):
 
 
 def urlscan_rows(name, timeout):
-    import requests
     rows = []
     try:
         url = "https://urlscan.io/api/v1/search/"
         params = {"q": "domain:" + name, "size": 100}
-        response = requests.get(url, params=params, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-        data = response.json()
+        data = fetch_json(url, params=params, timeout=timeout)
     except Exception as exc:
         rows.append(("urlscan.io", "Query failed (" + exc.__class__.__name__ + ")"))
         return rows
@@ -76,11 +74,9 @@ def urlscan_rows(name, timeout):
 
 
 def threatfox_rows(name, timeout):
-    import requests
     rows = []
     try:
-        response = requests.post("https://threatfox-api.abuse.ch/api/v1/", json={"query": "search_ioc", "search_term": name}, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-        data = response.json()
+        data = fetch_json("https://threatfox-api.abuse.ch/api/v1/", json_body={"query": "search_ioc", "search_term": name}, timeout=timeout, method="POST")
     except Exception as exc:
         rows.append(("ThreatFox", "Query failed (" + exc.__class__.__name__ + ")"))
         return rows
@@ -102,11 +98,9 @@ def threatfox_rows(name, timeout):
 
 
 def urlhaus_rows(name, timeout):
-    import requests
     rows = []
     try:
-        response = requests.post("https://urlhaus-api.abuse.ch/v1/host/", data={"host": name}, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-        data = response.json()
+        data = fetch_json("https://urlhaus-api.abuse.ch/v1/host/", data={"host": name}, timeout=timeout, method="POST")
     except Exception as exc:
         rows.append(("URLhaus", "Query failed (" + exc.__class__.__name__ + ")"))
         return rows

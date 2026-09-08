@@ -1,7 +1,7 @@
 import re
 
 from domainscan import dns_check, http_check
-from domainscan.helpers import short
+from domainscan.helpers import fetch_json, short
 
 
 def collect(info, apex, dns_data, web, whois_ns, timeout=8):
@@ -185,11 +185,9 @@ def spf_include_status(resolver, apex):
 
 
 def preload_status_rows(apex, timeout):
-    import requests
     rows = []
     try:
-        response = requests.get("https://hstspreload.org/api/v2/status", params={"domain": apex}, timeout=timeout, headers={"User-Agent": "DomainScan"})
-        data = response.json()
+        data = fetch_json("https://hstspreload.org/api/v2/status", params={"domain": apex}, timeout=timeout)
     except Exception:
         rows.append(("HSTS preload list", "Status check failed"))
         return rows

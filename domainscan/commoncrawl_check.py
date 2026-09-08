@@ -1,6 +1,6 @@
 import urllib.parse
 
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, fetch_json, fetch_text, short
 
 
 def collect(host, timeout=15):
@@ -33,21 +33,16 @@ def collect(host, timeout=15):
 
 
 def fetch_indexes(timeout):
-    import requests
-    response = requests.get("https://index.commoncrawl.org/collinfo.json", headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-    response.raise_for_status()
-    data = response.json() or []
+    data = fetch_json("https://index.commoncrawl.org/collinfo.json", timeout=timeout) or []
     indexes = [item.get("id", "") for item in data if item.get("id")]
     return indexes
 
 
 def fetch_captures(index, host, timeout, limit=800):
-    import requests
     params = {"url": host + "/*", "output": "json", "filter": "status:200"}
-    response = requests.get("https://index.commoncrawl.org/" + index + "-index", params=params, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
-    response.raise_for_status()
+    body = fetch_text("https://index.commoncrawl.org/" + index + "-index", params=params, timeout=timeout)
     captures = []
-    for line in (response.text or "").splitlines():
+    for line in body.splitlines():
         line = line.strip()
         if not line:
             continue

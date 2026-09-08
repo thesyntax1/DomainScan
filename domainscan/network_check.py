@@ -3,7 +3,7 @@ import re
 import socket
 import subprocess
 
-from domainscan.helpers import BROWSER_UA
+from domainscan.helpers import BROWSER_UA, fetch_json
 
 
 IPAPI_FIELDS = "status,message,continent,continentCode,country,countryCode,region,regionName,city,district,zip,lat,lon,timezone,offset,currency,isp,org,as,asname,reverse,mobile,proxy,hosting,query"
@@ -179,20 +179,17 @@ def describe_ip(ip, index):
 
 
 def second_source_rows(ip, primary, source, prefix):
-    import requests
     rows = []
     try:
         if source == "ip-api.com":
-            response = requests.get("https://ipwho.is/" + ip, headers={"User-Agent": BROWSER_UA}, timeout=8)
-            data = response.json()
+            data = fetch_json("https://ipwho.is/" + ip, timeout=8)
             if data.get("success") is False:
                 return rows
             other = normalize_ipwho(data)
             other_name = "ipwho.is"
         else:
             url = "http://ip-api.com/json/" + ip
-            response = requests.get(url, params={"fields": IPAPI_FIELDS}, headers={"User-Agent": BROWSER_UA}, timeout=8)
-            data = response.json()
+            data = fetch_json(url, params={"fields": IPAPI_FIELDS}, timeout=8)
             if data.get("status") != "success":
                 return rows
             other = data
@@ -234,21 +231,15 @@ def asn_number(text):
 
 def lookup_geo(ip):
     try:
-        import requests
         url = "http://ip-api.com/json/" + ip
         params = {"fields": IPAPI_FIELDS}
-        headers = {"User-Agent": BROWSER_UA}
-        response = requests.get(url, params=params, headers=headers, timeout=8)
-        data = response.json()
+        data = fetch_json(url, params=params, timeout=8)
         if data.get("status") == "success":
             return data, "ip-api.com"
     except Exception:
         pass
     try:
-        import requests
-        headers = {"User-Agent": BROWSER_UA}
-        response = requests.get("https://ipwho.is/" + ip, headers=headers, timeout=8)
-        data = response.json()
+        data = fetch_json("https://ipwho.is/" + ip, timeout=8)
         if data.get("success") is False:
             return None, ""
         return normalize_ipwho(data), "ipwho.is"

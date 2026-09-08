@@ -108,6 +108,8 @@ def collect(start_url, timeout=8, max_pages=15, seed_urls=None):
         rows.append(("Duplicate titles", str(len(dupes))))
         for title in list(dupes)[:5]:
             rows.append(("Duplicate title", short(title, 120) + " (" + str(len(dupes[title])) + " pages)"))
+    rows.extend(thin_content_rows(visited))
+    rows.extend(query_param_rows(visited))
     if external:
         rows.append(("External domains", str(len(external))))
         for host in sorted(external, key=lambda h: -external[h])[:8]:
@@ -153,3 +155,71 @@ def extract_title(html):
     if match:
         return short(re.sub(r"\s+", " ", match.group(1).strip()), 100)
     return ""
+
+
+def thin_content_rows(visited, threshold=200):
+    rows = []
+    counts = []
+    for url, (status, text, size, elapsed) in visited.items():
+        if status != 200 or not text:
+            continue
+        words = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<script.*?</script>|<style.*?</style>|<[^>]+>", " ", text, flags=re.IGNORECASE | re.DOTALL)))
+        counts.append((url, words))
+    if not counts:
+        return rows
+    thin = [(url, words) for url, words in counts if words < threshold]
+    rows.append(("Thin pages (<" + str(threshold) + " words)", str(len(thin)) + " of " + str(len(counts))))
+    for url, words in sorted(thin, key=lambda item: item[1])[:5]:
+        rows.append(("Thin page", str(words) + " words " + short(url, 140)))
+    if counts:
+        total = sum(words for _, words in counts)
+        rows.append(("Average page words", str(total // len(counts))))
+    return rows
+
+
+TRACKING_KEYS = ("utm_", "fbclid", "gclid", "msclkid", "mc_cid", "igshid", "_ga", "yclid", "dclid")
+
+
+def query_param_rows(visited):
+    rows = []
+    tracked = 0
+    with_query = 0
+    dupes = 0
+    overlong = 0
+    key_counts = {}
+    for url in visited:
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except Exception:
+            continue
+        if not parts.query:
+            continue
+        with_query += 1
+        if len(url) > 250:
+            overlong += 1
+        try:
+            pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+        except Exception:
+            continue
+        seen = set()
+        for key, _ in pairs:
+            low = key.lower()
+            key_counts[low] = key_counts.get(low, 0) + 1
+            if low in seen:
+                dupes += 1
+            seen.add(low)
+            if low.startswith(TRACKING_KEYS):
+                tracked += 1
+                break
+    if not with_query:
+        return rows
+    rows.append(("Crawled URLs with query strings", str(with_query)))
+    rows.append(("URLs with tracking parameters", str(tracked)))
+    if key_counts:
+        top = sorted(key_counts, key=lambda k: -key_counts[k])[:5]
+        rows.append(("Top query keys", ", ".join(key + "x" + str(key_counts[key]) for key in top)))
+    if dupes:
+        rows.append(("Duplicate query keys", str(dupes) + " URLs repeat a key"))
+    if overlong:
+        rows.append(("Overlong URLs", str(overlong) + " over 250 chars"))
+    return rows

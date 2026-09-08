@@ -2173,6 +2173,9 @@ class ThreatIntelTests(unittest.TestCase):
         ]}
 
         class FakeResponse:
+            def raise_for_status(self):
+                pass
+
             def json(self):
                 return payload
 
@@ -2183,7 +2186,8 @@ class ThreatIntelTests(unittest.TestCase):
 
     def test_urlscan_failure(self):
         with patch("requests.get", side_effect=RuntimeError("down")):
-            data = rows_to_dict(threat_check.urlscan_rows("example.com", 5))
+            with patch("time.sleep"):
+                data = rows_to_dict(threat_check.urlscan_rows("example.com", 5))
         self.assertIn("Query failed", data["urlscan.io"])
 
 
@@ -2361,6 +2365,9 @@ class PreloadTests(unittest.TestCase):
         from unittest import mock
 
         class FakeResponse:
+            def raise_for_status(self):
+                pass
+
             def json(self):
                 return {"status": "preloaded"}
 
@@ -2371,7 +2378,8 @@ class PreloadTests(unittest.TestCase):
     def test_failed(self):
         from unittest import mock
         with mock.patch("requests.get", side_effect=RuntimeError("down")):
-            data = rows_to_dict(cross_check.preload_status_rows("example.com", 5))
+            with mock.patch("time.sleep"):
+                data = rows_to_dict(cross_check.preload_status_rows("example.com", 5))
         self.assertIn("failed", data["HSTS preload list"])
 
 
@@ -2406,6 +2414,9 @@ class SubdomainSourceTests(unittest.TestCase):
         from unittest import mock
 
         class FakeResponse:
+            def raise_for_status(self):
+                pass
+
             def json(self):
                 return {"passive_dns": [{"hostname": "a.example.com"}, {"hostname": "other.net"}]}
 
@@ -2416,6 +2427,9 @@ class SubdomainSourceTests(unittest.TestCase):
         from unittest import mock
 
         class FakeResponse:
+            def raise_for_status(self):
+                pass
+
             def json(self):
                 return ["b.example.com", "x.other.net"]
 
@@ -2425,8 +2439,9 @@ class SubdomainSourceTests(unittest.TestCase):
     def test_failures(self):
         from unittest import mock
         with mock.patch("requests.get", side_effect=RuntimeError("down")):
-            self.assertIsNone(subdomain_check.fetch_otx("example.com"))
-            self.assertIsNone(subdomain_check.fetch_anubis("example.com"))
+            with mock.patch("time.sleep"):
+                self.assertIsNone(subdomain_check.fetch_otx("example.com"))
+                self.assertIsNone(subdomain_check.fetch_anubis("example.com"))
 
     def test_takeover_markers(self):
         self.assertGreaterEqual(len(subdomain_check.TAKEOVER_BODIES), 50)
@@ -2471,6 +2486,9 @@ class GeoCrossTests(unittest.TestCase):
         from unittest import mock
 
         class FakeResponse:
+            def raise_for_status(self):
+                pass
+
             def json(self):
                 return {"success": True, "country_code": "US", "connection": {"asn": 15169}}
 
@@ -2483,6 +2501,9 @@ class GeoCrossTests(unittest.TestCase):
         from unittest import mock
 
         class FakeResponse:
+            def raise_for_status(self):
+                pass
+
             def json(self):
                 return {"success": True, "country_code": "DE", "connection": {"asn": 3320}}
 
@@ -2514,3 +2535,125 @@ class GradeSectionTests(unittest.TestCase):
         self.assertIn("Grade", result["sections"])
         data = rows_to_dict(result["sections"]["Grade"])
         self.assertIn("Security grade", data)
+
+
+class RobustFetchTests(unittest.TestCase):
+    def test_fetch_json_retries_then_succeeds(self):
+        calls = []
+
+        class Flaky:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                if len(calls) < 2:
+                    calls.append(1)
+                    raise ValueError("bad json")
+                return {"ok": True}
+
+        with unittest.mock.patch("requests.get", return_value=Flaky()):
+            with unittest.mock.patch("time.sleep"):
+                self.assertEqual(helpers.fetch_json("https://example.com/x", tries=3), {"ok": True})
+
+    def test_fetch_json_gives_up(self):
+        class Bad:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                raise ValueError("bad json")
+
+        with unittest.mock.patch("requests.get", return_value=Bad()):
+            with unittest.mock.patch("time.sleep"):
+                with self.assertRaises(ValueError):
+                    helpers.fetch_json("https://example.com/x", tries=2)
+
+    def test_fetch_text_gives_up(self):
+        import requests
+
+        with unittest.mock.patch("requests.get", side_effect=requests.ConnectionError("down")):
+            with unittest.mock.patch("time.sleep"):
+                with self.assertRaises(requests.ConnectionError):
+                    helpers.fetch_text("https://example.com/x", tries=2)
+
+
+class DeeperDataTests(unittest.TestCase):
+    def test_generator_versions(self):
+        data = rows_to_dict(content_check.generator_version_rows("WordPress 6.1.1"))
+        self.assertIn("Exact versions disclosed", data)
+        other = rows_to_dict(content_check.generator_version_rows("CustomCMS 2.4"))
+        self.assertIn("Version disclosure", other)
+        self.assertEqual(content_check.generator_version_rows("Something Else"), [])
+
+    def test_js_jwt_and_sinks(self):
+        token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl"
+        data = rows_to_dict(js_check.jwt_rows([("app.js", "var t = '" + token + "';")]))
+        self.assertTrue(data.get("Hardcoded JWTs", "").startswith("1 "))
+        self.assertIn("JWT claims", data)
+        dangers = rows_to_dict(js_check.danger_rows([("app.js", "new Function(x); setInterval('y', 1); Object.assign({}, z);")]))
+        self.assertIn("Sink: Function() constructors", dangers)
+        self.assertIn("Sink: setInterval strings", dangers)
+        self.assertIn("Sink: merge/extend calls", dangers)
+
+    def test_hreflang_validation(self):
+        self.assertTrue(seo_check.valid_lang_code("en-US"))
+        self.assertTrue(seo_check.valid_lang_code("x-default"))
+        self.assertFalse(seo_check.valid_lang_code("english_USA!"))
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<link rel="alternate" hreflang="en" href="https://example.com/en"><link rel="alternate" hreflang="bad!" href="https://example.com/x">', "html.parser")
+        data = rows_to_dict(seo_check.hreflang_rows(soup, 1, "https://example.com/en"))
+        self.assertIn("Hreflang invalid codes", data)
+        self.assertIn("Present", data.get("Hreflang self-reference", ""))
+
+    def test_ads_malformed(self):
+        data = rows_to_dict(files_check.parse_ads({"ok": True, "text": "google.com, pub-1, DIRECT\nbroken line"}))
+        self.assertIn("ads.txt malformed", data)
+
+    def test_thin_content(self):
+        visited = {
+            "https://a.example/": (200, "<p>" + "word " * 300 + "</p>", 1, 1),
+            "https://a.example/t": (200, "<p>tiny</p>", 1, 1),
+        }
+        data = rows_to_dict(crawl_check.thin_content_rows(visited))
+        self.assertEqual(data.get("Thin pages (<200 words)"), "1 of 2")
+        self.assertIn("Thin page", data)
+        self.assertIn("Average page words", data)
+
+    def test_query_params(self):
+        visited = {
+            "https://a.example/?utm_source=x&id=1": (200, "", 1, 1),
+            "https://a.example/?id=1&id=2": (200, "", 1, 1),
+        }
+        data = rows_to_dict(crawl_check.query_param_rows(visited))
+        self.assertEqual(data.get("URLs with tracking parameters"), "1")
+        self.assertIn("Duplicate query keys", data)
+        self.assertIn("Top query keys", data)
+
+    def test_contrast(self):
+        from bs4 import BeautifulSoup
+        html = '<p style="color:#777777;background:#ffffff">x</p>'
+        data = rows_to_dict(content_check.contrast_rows(BeautifulSoup(html, "html.parser"), html))
+        self.assertIn("Low-contrast pairs", data)
+        html2 = '<p style="color:#000000;background:#ffffff">x</p>'
+        data2 = rows_to_dict(content_check.contrast_rows(BeautifulSoup(html2, "html.parser"), html2))
+        self.assertIn("Contrast verdict", data2)
+
+    def test_sitemap_index_flag(self):
+        parsed = files_check.parse_sitemap({"ok": True, "text": "<sitemapindex><sitemap><loc>https://a.example/s.xml</loc></sitemap></sitemapindex>", "size": 5})
+        self.assertTrue(parsed["is_index"])
+        self.assertEqual(parsed["urls"], ["https://a.example/s.xml"])
+
+    def test_trend_needs_two_scans(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            current = {"meta": {"scanned_at": "2026-09-08"}, "target": {"host": "example.com"}, "sections": {"A": [("k", "v")]}}
+            data = rows_to_dict(history_store.trend_rows("example.com", current, tmp))
+            self.assertIn("Trend", data)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_abuse_contact(self):
+        data = {"entities": [{"roles": ["abuse"], "vcardArray": [None, [["email", {}, "text", "abuse@example.com"]]]}]}
+        rows = whois_check.parse_rdap(data)
+        found = rows_to_dict(rows)
+        self.assertIn("Abuse contact", found)
