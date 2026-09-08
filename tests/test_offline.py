@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import bgp_check, content_check, crawl_check, dns_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, ports_check, profiles, reputation_check, subdomain_check, web_extra_check, whois_check
+from domainscan import bgp_check, content_check, crawl_check, cross_check, dns_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, ports_check, profiles, rdap_check, reputation_check, subdomain_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -1211,3 +1211,174 @@ class ZAppWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RdapBootstrapTests(unittest.TestCase):
+    def test_find_dns_service(self):
+        data = {"services": [[["com", "net"], ["https://rdap.verisign.com/com/v1/"]]]}
+        self.assertEqual(rdap_check.find_services(data, "dns", "com"), ["https://rdap.verisign.com/com/v1/"])
+
+    def test_find_ipv4_service(self):
+        data = {"services": [[["1.0.0.0/8"], ["https://rdap.apnic.net/"]]]}
+        self.assertEqual(rdap_check.find_services(data, "ipv4", "1.2.3.4"), ["https://rdap.apnic.net/"])
+
+    def test_no_match_returns_empty(self):
+        data = {"services": [[["zz"], ["https://example.invalid/"]]]}
+        self.assertEqual(rdap_check.find_services(data, "dns", "com"), [])
+
+
+class RdapParseTests(unittest.TestCase):
+    def test_domain_payload(self):
+        payload = {
+            "handle": "H1", "ldhName": "example.com", "port43": "whois.example",
+            "status": ["clientTransferProhibited https://icann.org/epp"], 
+            "events": [{"eventAction": "registration", "eventDate": "2020-01-01T00:00:00Z"},
+                       {"eventAction": "expiration", "eventDate": "2030-01-01T00:00:00Z"}],
+            "nameservers": [{"ldhName": "ns1.example.com", "ipAddresses": {"v4": ["1.2.3.4"]}}],
+            "secureDNS": {"delegationSigned": True},
+            "entities": [{"roles": ["registrar"], "handle": "R1",
+                          "vcardArray": ["vcard", [["fn", {}, "text", "Example Registrar"],
+                                                   ["email", {}, "text", "abuse@example.com"]]]}],
+        }
+        rows = whois_check.parse_rdap(payload)
+        by_key = {key: value for key, value in rows}
+        self.assertEqual(by_key["Domain name"], "example.com")
+        self.assertIn("locked against transfer", by_key["Status 1"])
+        self.assertEqual(by_key["Nameserver 1"], "ns1.example.com")
+        self.assertEqual(by_key["DNSSEC delegation"], "Signed")
+        self.assertEqual(by_key["Registrar email"], "abuse@example.com")
+        self.assertIn("years", by_key["Domain age"])
+        self.assertIn("Expires in", by_key["Domain expiry"])
+
+    def test_ip_payload(self):
+        payload = {"handle": "NET-1", "name": "TEST-NET", "country": "US",
+                   "startAddress": "192.0.2.0", "endAddress": "192.0.2.255",
+                   "cidr0_cidrs": [{"v4prefix": "192.0.2.0/24"}],
+                   "status": ["active"],
+                   "entities": [{"roles": ["administrative"],
+                                 "vcardArray": ["vcard", [["email", {}, "text", "noc@example.net"]]]}]}
+        rows = whois_check.parse_ip_rdap(payload)
+        by_key = {key: value for key, value in rows}
+        self.assertEqual(by_key["CIDR"], "192.0.2.0/24")
+        self.assertEqual(by_key["Administrative email"], "noc@example.net")
+
+    def test_whois_text_parser(self):
+        text = ("Domain Name: EXAMPLE.COM\nRegistrar: Example Registrar, Inc.\n"
+                "Creation Date: 2020-05-01T00:00:00Z\nRegistry Expiry Date: 2030-05-01T00:00:00Z\n"
+                "Domain Status: clientTransferProhibited https://icann.org/epp\n"
+                "Name Server: NS1.EXAMPLE.COM\nName Server: NS2.EXAMPLE.COM\n"
+                "Registrant Email: owner@example.com\nDNSSEC: signedDelegation\n")
+        rows = whois_check.parse_whois_text(text)
+        by_key = {key: value for key, value in rows}
+        self.assertEqual(by_key["Registrar"], "Example Registrar, Inc.")
+        self.assertIn("locked", by_key["Status 1"])
+        self.assertEqual(by_key["Nameserver count"], "2")
+        self.assertEqual(by_key["Registrant email"], "owner@example.com")
+        self.assertIn("Expires in", by_key["Domain expiry"])
+
+    def test_resolve_target(self):
+        resolved = whois_check.resolve_whois_target("https://blog.example.co.uk/post")
+        self.assertEqual(resolved["query"], "example.co.uk")
+        self.assertIn("registrable", resolved["note"])
+        resolved_ip = whois_check.resolve_whois_target("8.8.8.8")
+        self.assertEqual(resolved_ip["kind"], "ip")
+
+    def test_ns_describe_lame(self):
+        from unittest.mock import patch
+        with patch("domainscan.dns_check.query", return_value={"records": []}):
+            rows = whois_check.describe_nameservers("example.com", ["ns1.example.com", "bad.example.net"])
+        by_key = {key: value for key, value in rows}
+        self.assertIn("lame", by_key["NS check: ns1.example.com"])
+        self.assertIn("in-bailiwick", by_key["NS check: ns1.example.com"])
+
+
+class CrossCheckTests(unittest.TestCase):
+    def test_ns_consistency_match(self):
+        rows = cross_check.ns_consistency(["NS1.Example.com."], ["ns1.example.com"])
+        self.assertIn("Match", rows[0][1])
+
+    def test_ns_consistency_mismatch(self):
+        rows = cross_check.ns_consistency(["ns1.example.com"], ["ns9.example.com"])
+        self.assertIn("Mismatch", rows[0][1])
+
+    def test_dnssec_completeness(self):
+        self.assertIn("Complete", cross_check.dnssec_completeness({"ds": ["x"], "dnskey": ["y"]})[0][1])
+        self.assertIn("Unsigned", cross_check.dnssec_completeness({"ds": [], "dnskey": []})[0][1])
+
+    def test_soa_serial(self):
+        self.assertIn("2024-05-06", cross_check.soa_serial_verdict("ns1 host 2024050601 7200 3600 1209600 3600"))
+        self.assertIn("Counter", cross_check.soa_serial_verdict("ns1 host 42 7200 3600 1209600 3600"))
+
+    def test_spf_dmarc_parsers(self):
+        self.assertEqual(cross_check.parse_spf_includes("v=spf1 include:_spf.google.com redirect=x.example ~all"),
+                         ["_spf.google.com", "x.example"])
+        self.assertEqual(cross_check.parse_dmarc_rua("v=DMARC1; p=reject; rua=mailto:a@example.com,mailto:b@example.org"),
+                         ["example.com", "example.org"])
+
+    def test_cookie_security(self):
+        rows = cross_check.cookie_security([{"name": "a", "secure": True}, {"name": "b", "secure": False}], True)
+        self.assertIn("missing Secure", rows[0][1])
+        self.assertIn("plain HTTP", cross_check.cookie_security([], False)[0][1])
+
+
+class AccuracyPatchTests(unittest.TestCase):
+    def test_ds_dnskey_parse(self):
+        rows = dns_check.parse_ds(["12345 8 2 AABBCCDD"])
+        self.assertIn("RSASHA256", rows[0][1])
+        rows = dns_check.parse_dnskey(["257 3 8 AABBCC"])
+        self.assertIn("KSK", rows[0][0])
+        rows = dns_check.parse_dnskey(["256 3 13 AABBCC"])
+        self.assertIn("ECDSAP256SHA256", rows[0][1])
+
+    def test_clock_skew(self):
+        import datetime as dt
+        now = dt.datetime(2026, 6, 1, 12, 0, 0)
+        self.assertIn("behind", http_check.clock_skew("Mon, 01 Jun 2026 11:59:00 GMT", now))
+        self.assertIn("ahead", http_check.clock_skew("Mon, 01 Jun 2026 12:05:00 GMT", now))
+        self.assertIn("No Date", http_check.clock_skew(""))
+
+    def test_spf_issues(self):
+        tokens = ["v=spf1", "ptr", "include:a.example"]
+        issues = mail_check.spf_issues("v=spf1 ptr include:a.example", tokens, 3)
+        joined = " ".join(issues)
+        self.assertIn("no default all", joined)
+        self.assertIn("ptr", joined)
+
+    def test_prefix_size(self):
+        self.assertEqual(bgp_check.prefix_size("192.0.2.0/24"), "256 addresses")
+        self.assertEqual(bgp_check.prefix_size("1.2.3.4/32"), "1 address")
+        self.assertTrue(bgp_check.prefix_size("2001:db8::/32").startswith("2^"))
+
+    def test_ports_classify(self):
+        import socket as sockmod
+        self.assertEqual(ports_check.classify_error(ConnectionRefusedError()), "closed")
+        self.assertEqual(ports_check.classify_error(sockmod.timeout()), "filtered")
+
+    def test_subdomain_depths(self):
+        depths = subdomain_check.subdomain_depths(["a.example.com", "b.a.example.com"], "example.com")
+        self.assertEqual(depths, {1: 1, 2: 1})
+
+    def test_wildcard_filter(self):
+        from unittest.mock import patch
+        def fake_query(resolver, name, rtype):
+            if name == "real.example.com":
+                return {"records": ["9.9.9.9"]}
+            return {"records": ["5.5.5.5"]}
+        with patch("domainscan.dns_check.query", side_effect=fake_query):
+            confirmed, excluded = subdomain_check.verify_names(None, ["real.example.com", "fake.example.com"], 10, ["5.5.5.5"])
+        self.assertEqual(list(confirmed), ["real.example.com"])
+        self.assertEqual(excluded, 1)
+
+    def test_network_helpers(self):
+        self.assertIn("A and AAAA", network_check.dual_stack(["1.2.3.4", "2001:db8::1"]))
+        self.assertTrue(network_check.routable("1.2.3.4"))
+        self.assertFalse(network_check.routable("127.0.0.1"))
+        self.assertIn("openstreetmap", network_check.map_link(41.0, 29.0))
+
+    def test_idn_warning(self):
+        info = helpers.parse_target("münchen.de")
+        rows = helpers.describe_target(info)
+        self.assertTrue(any("homograph" in value for key, value in rows if key == "IDN warning"))
+        info2 = helpers.parse_target("example.com")
+        rows2 = helpers.describe_target(info2)
+        self.assertTrue(any(key == "IDN check" for key, value in rows2))

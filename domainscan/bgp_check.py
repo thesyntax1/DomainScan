@@ -59,9 +59,31 @@ def parse_ip_info(info, ip, rows):
         rows.append((ip + " AS holder", short(name, 120)))
     if country:
         rows.append((ip + " AS country", str(country)))
+    description = info.get("description", "")
+    if description:
+        rows.append((ip + " prefix use", short(description, 120)))
+    if prefix:
+        size = prefix_size(prefix)
+        if size:
+            rows.append((ip + " prefix size", size))
     if asn:
         return asn
     return 0
+
+
+def prefix_size(prefix):
+    import ipaddress
+    try:
+        network = ipaddress.ip_network(str(prefix), strict=False)
+    except Exception:
+        return ""
+    bits = network.max_prefixlen - network.prefixlen
+    if network.version == 6:
+        return "2^" + str(bits) + " addresses"
+    total = 2 ** bits
+    if total == 1:
+        return "1 address"
+    return str(total) + " addresses"
 
 
 def fetch_asn_info(asn):

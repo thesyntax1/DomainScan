@@ -10,7 +10,21 @@ except Exception:
 
 HOST_TYPES = ["A", "AAAA", "CNAME"]
 DOMAIN_TYPES = ["MX", "NS", "TXT", "SOA", "CAA"]
-EXTRA_HOST_TYPES = ["HTTPS", "SVCB", "SSHFP", "NAPTR", "LOC"]
+EXTRA_HOST_TYPES = ["HTTPS", "SVCB", "SSHFP", "NAPTR", "LOC", "DNAME"]
+
+
+DNSKEY_ALGORITHMS = {
+    "1": "RSAMD5",
+    "5": "RSASHA1",
+    "7": "RSASHA1-NSEC3",
+    "8": "RSASHA256",
+    "10": "RSASHA512",
+    "12": "ECC-GOST",
+    "13": "ECDSAP256SHA256",
+    "14": "ECDSAP384SHA384",
+    "15": "Ed25519",
+    "16": "Ed448",
+}
 
 
 def make_resolver():
@@ -124,6 +138,34 @@ def parse_caa(records):
         rows.append(("CAA policy " + str(count), tag + " " + value + " (flags " + parts[0] + ")"))
     if count:
         rows.append(("CAA restricts issuance", "Yes (" + str(count) + " policies)"))
+    return rows
+
+
+def parse_ds(records):
+    rows = []
+    for record in records or []:
+        parts = record.split()
+        if len(parts) < 4:
+            continue
+        digest_names = {"1": "SHA-1", "2": "SHA-256", "4": "SHA-384"}
+        rows.append(("DS key " + parts[0], "algorithm " + DNSKEY_ALGORITHMS.get(parts[1], parts[1]) + ", digest " + digest_names.get(parts[2], parts[2])))
+    return rows
+
+
+def parse_dnskey(records):
+    rows = []
+    for record in records or []:
+        parts = record.split()
+        if len(parts) < 4:
+            continue
+        flags = parts[0]
+        if flags == "257":
+            role = "KSK (key signing)"
+        elif flags == "256":
+            role = "ZSK (zone signing)"
+        else:
+            role = "flags " + flags
+        rows.append(("DNSKEY " + role, "algorithm " + DNSKEY_ALGORITHMS.get(parts[2], parts[2])))
     return rows
 
 
@@ -247,6 +289,8 @@ def collect(host, apex):
         query_type(resolver, host, "NSEC3PARAM", rows, "")
     rows.extend(parse_soa(data["soa_apex"] or data["soa"]))
     rows.extend(parse_caa(data["caa_apex"] or data["caa"]))
+    rows.extend(parse_ds(data["ds"]))
+    rows.extend(parse_dnskey(data["dnskey"]))
     rows.extend(compare_resolvers(host, data["a"]))
     if apex:
         zone = apex

@@ -21,6 +21,9 @@ def collect(ips, host=""):
             rows.append(("ICMP ping", ping(host)))
         return {"rows": rows}
     rows.append(("IP address count", str(len(unique))))
+    rows.append(("Dual stack", dual_stack(unique)))
+    for ip in unique[:2]:
+        rows.append((ip + " routable", "Yes, public IP" if routable(ip) else "No (private or reserved)"))
     if host:
         rows.append(("ICMP ping", ping(host)))
     shown = unique[:6]
@@ -49,6 +52,28 @@ def ping(host):
     if match:
         return "Reply in " + match.group(1) + " ms"
     return "Reply received"
+
+
+def dual_stack(ips):
+    v4 = any(":" not in ip for ip in ips)
+    v6 = any(":" in ip for ip in ips)
+    if v4 and v6:
+        return "Yes (A and AAAA records)"
+    if v6:
+        return "No (IPv6 only)"
+    return "No (IPv4 only)"
+
+
+def routable(ip):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(ip).is_global
+    except Exception:
+        return False
+
+
+def map_link(lat, lon):
+    return "https://www.openstreetmap.org/?mlat=" + str(lat) + "&mlon=" + str(lon) + "&zoom=10"
 
 
 def reverse_dns(ip):
@@ -117,6 +142,8 @@ def describe_ip(ip, index):
             else:
                 value = "No"
         rows.append((prefix + label, str(value)))
+    if geo.get("lat", "") != "" and geo.get("lon", "") != "":
+        rows.append((prefix + "map", map_link(geo.get("lat"), geo.get("lon"))))
     return rows
 
 

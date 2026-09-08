@@ -1,8 +1,37 @@
 import datetime
+import ipaddress
 import re
 import socket
 
+from domainscan import dns_check, rdap_check
 from domainscan.helpers import BROWSER_UA, short
+
+
+STATUS_MEANINGS = {
+    "addperiod": "recently registered",
+    "autorenewperiod": "expired, in grace period",
+    "clientdeleteprohibited": "registrar locked against deletion",
+    "clienthold": "registrar hold, DNS disabled",
+    "clientrenewprohibited": "registrar locked against renewal",
+    "clienttransferprohibited": "registrar locked against transfer",
+    "clientupdateprohibited": "registrar locked against updates",
+    "inactive": "not delegated",
+    "linked": "associated with another object",
+    "ok": "active",
+    "pendingcreate": "creation in progress",
+    "pendingdelete": "deletion in progress",
+    "pendingrenew": "renewal in progress",
+    "pendingrestore": "restoration in progress",
+    "pendingtransfer": "transfer in progress",
+    "pendingupdate": "update in progress",
+    "redemptionperiod": "expired, restorable for a fee",
+    "renewperiod": "recently renewed",
+    "serverdeleteprohibited": "registry locked against deletion",
+    "serverhold": "registry hold, DNS disabled",
+    "serverrenewprohibited": "registry locked against renewal",
+    "servertransferprohibited": "registry locked against transfer",
+    "serverupdateprohibited": "registry locked against updates",
+}
 
 
 def collect(domain, host):
@@ -13,86 +42,184 @@ def collect(domain, host):
         target = host
     rows.append(("WHOIS query", target))
     try:
-        data = fetch_rdap(target)
-    except Exception as exc:
-        data = None
-        rows.append(("RDAP status", "RDAP lookup failed (" + exc.__class__.__name__ + ")"))
-    if data:
-        rows.extend(parse_rdap(data))
-        return {"rows": rows}
+        ipaddress.ip_address(target)
+        return collect_ip(rows, target)
+    except ValueError:
+        return collect_domain(rows, target)
+
+
+def collect_domain(rows, target):
+    payload, base, urls = fetch_domain_rdap(target)
+    if urls:
+        rows.append(("TLD RDAP", ", ".join(urls[:3])))
+    if payload:
+        if base:
+            rows.append(("RDAP server", base))
+        rows.extend(parse_rdap(payload))
+        nameservers = extract_nameservers(rows)
+        rows.extend(describe_nameservers(target, nameservers))
+        rows.extend(contact_count_rows(rows))
+        return {"rows": rows, "nameservers": nameservers}
+    rows.append(("RDAP status", "RDAP lookup failed"))
     try:
-        text, servers = fetch_whois(target)
+        text, servers, iana_text = fetch_whois(target)
     except Exception as exc:
         rows.append(("WHOIS status", "WHOIS lookup failed (" + exc.__class__.__name__ + ")"))
-        return {"rows": rows}
+        return {"rows": rows, "nameservers": []}
     rows.append(("WHOIS servers", ", ".join(servers)))
     rows.extend(parse_whois_text(text))
-    return {"rows": rows}
+    if iana_text:
+        rows.extend(parse_iana_tld(iana_text))
+    rows.append(("Raw WHOIS lines", str(len(text.splitlines()))))
+    if len(text) > 6000:
+        rows.append(("Raw WHOIS", text[:6000] + "... (truncated)"))
+    else:
+        rows.append(("Raw WHOIS", text))
+    nameservers = extract_nameservers(rows)
+    rows.extend(describe_nameservers(target, nameservers))
+    rows.extend(contact_count_rows(rows))
+    return {"rows": rows, "nameservers": nameservers}
 
 
-def parse_date_flexible(text):
-    cleaned = (text or "").strip()
-    if not cleaned:
-        return None
+def collect_ip(rows, target):
     try:
-        candidate = cleaned
-        if "T" in candidate and candidate[-1:] in ("Z", "z"):
-            candidate = candidate[:-1] + "+00:00"
-        return datetime.datetime.fromisoformat(candidate)
+        version = ipaddress.ip_address(target).version
     except Exception:
-        pass
-    candidate = re.sub(r"\s+", " ", cleaned)
-    patterns = [
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-        "%d-%b-%Y",
-        "%d-%b-%Y %H:%M:%S",
-        "%d-%b-%Y %H:%M:%S %Z",
-        "%Y.%m.%d",
-        "%Y/%m/%d",
-        "%b %d %Y",
-        "%d %b %Y",
-    ]
-    for pattern in patterns:
+        version = 4
+    if version == 6:
+        kind = "ipv6"
+    else:
+        kind = "ipv4"
+    try:
+        data = rdap_check.bootstrap(kind)
+        urls = rdap_check.find_services(data, kind, target)
+    except Exception:
+        urls = []
+    payload = None
+    base = ""
+    for candidate in urls or []:
         try:
-            return datetime.datetime.strptime(candidate, pattern)
+            payload = rdap_check.rdap_get(candidate.rstrip("/") + "/ip/" + target)
+            base = candidate
+            break
         except Exception:
             continue
-    return None
+    if not payload:
+        rows.append(("IP WHOIS", "RIR lookup failed"))
+        return {"rows": rows, "nameservers": []}
+    rows.append(("RDAP server", base))
+    rows.extend(parse_ip_rdap(payload))
+    rows.extend(contact_count_rows(rows))
+    return {"rows": rows, "nameservers": []}
 
 
-def age_rows(created_text, expires_text):
-    rows = []
-    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    created = parse_date_flexible(created_text)
-    expires = parse_date_flexible(expires_text)
-    if created:
-        if created.tzinfo:
-            created = created.replace(tzinfo=None)
-        days = (now - created).days
-        rows.append(("Domain age", str(days) + " days (" + str(round(days / 365.25, 1)) + " years)"))
-    if expires:
-        if expires.tzinfo:
-            expires = expires.replace(tzinfo=None)
-        left = (expires - now).days
-        if left < 0:
-            rows.append(("Domain expiry", "Expired " + str(abs(left)) + " days ago"))
-        else:
-            rows.append(("Domain expiry", "Expires in " + str(left) + " days"))
-            if left < 30:
-                rows.append(("Expiry urgency", "Expiring soon"))
-    return rows
+def resolve_whois_target(raw):
+    from domainscan import helpers
+    info = helpers.parse_target(raw)
+    if info["is_ip"]:
+        return {"kind": "ip", "query": info["host"], "note": ""}
+    parts = helpers.split_domain(info["host"], False)
+    if parts["subdomain"]:
+        return {"kind": "domain", "query": parts["registrable"], "note": "Using registrable domain " + parts["registrable"]}
+    return {"kind": "domain", "query": info["host"], "note": ""}
 
 
-def fetch_rdap(domain):
+def fetch_domain_rdap(target):
+    tld = target.rsplit(".", 1)[-1].lower()
+    try:
+        data = rdap_check.bootstrap("dns")
+        urls = rdap_check.find_services(data, "dns", tld)
+    except Exception:
+        urls = []
+    for base in urls or []:
+        try:
+            payload = rdap_check.rdap_get(base.rstrip("/") + "/domain/" + target)
+            return payload, base, urls
+        except Exception:
+            continue
+    try:
+        payload = fetch_rdap_proxy(target)
+        return payload, "https://rdap.org (proxy)", urls or []
+    except Exception:
+        return None, "", urls or []
+
+
+def fetch_rdap_proxy(domain):
     import requests
     url = "https://rdap.org/domain/" + domain
     headers = {"User-Agent": BROWSER_UA, "Accept": "application/json"}
     response = requests.get(url, timeout=12, headers=headers)
     response.raise_for_status()
     return response.json()
+
+
+def status_meaning(code):
+    clean = (code or "").split()[0].lower() if (code or "").split() else ""
+    return STATUS_MEANINGS.get(clean, "")
+
+
+def with_meaning(value):
+    meaning = status_meaning(value)
+    if meaning:
+        return short(value, 140) + " (" + meaning + ")"
+    return short(value, 160)
+
+
+def extract_nameservers(rows):
+    names = []
+    for key, value in rows:
+        if re.fullmatch(r"Nameserver \d+", key or ""):
+            clean = (value or "").strip().rstrip(".")
+            if clean and clean not in names:
+                names.append(clean)
+    return names
+
+
+def describe_nameservers(domain, nameservers, resolver=None):
+    rows = []
+    if not nameservers:
+        return rows
+    if resolver is None:
+        if not dns_check.HAS_DNSPYTHON:
+            rows.append(("NS resolution", "Skipped (dnspython not installed)"))
+            return rows
+        resolver = dns_check.make_resolver()
+    for clean in nameservers[:8]:
+        name = clean.rstrip(".")
+        note = ""
+        if domain and (name.lower() == domain.lower() or name.lower().endswith("." + domain.lower())):
+            note = " (in-bailiwick, needs glue)"
+        try:
+            result = dns_check.query(resolver, name, "A")
+            records = result["records"]
+        except Exception:
+            records = []
+        if records:
+            rows.append(("NS check: " + name, "Resolves to " + ", ".join(records[:4]) + note))
+        else:
+            rows.append(("NS check: " + name, "Does not resolve (possible lame delegation)" + note))
+    return rows
+
+
+def contact_count_rows(rows):
+    emails = [key for key, value in rows if (key or "").lower().endswith("email") and "@" in (value or "")]
+    if emails:
+        return [("Contact emails found", str(len(emails)))]
+    return []
+
+
+def parse_iana_tld(text):
+    rows = []
+    org = first_match(text, [r"^\s*organisation:\s*(.+)$"])
+    if org:
+        rows.append(("TLD manager", short(org, 160)))
+    server = first_match(text, [r"^\s*whois:\s*(\S+)$"])
+    if server:
+        rows.append(("TLD whois server", server))
+    status = first_match(text, [r"^\s*status:\s*(.+)$"])
+    if status:
+        rows.append(("TLD status", short(status, 120)))
+    return rows
 
 
 def parse_rdap(data):
@@ -107,11 +234,15 @@ def parse_rdap(data):
     port43 = data.get("port43", "")
     if port43:
         rows.append(("WHOIS server", str(port43)))
+    for link in data.get("links", []) or []:
+        if link.get("rel", "") == "related" and "rdap" in str(link.get("type", "")).lower():
+            rows.append(("Registrar RDAP", short(link.get("href", ""), 200)))
+            break
     statuses = data.get("status", []) or []
     if statuses:
         rows.append(("Status count", str(len(statuses))))
         for index, status in enumerate(statuses, 1):
-            rows.append(("Status " + str(index), short(status, 160)))
+            rows.append(("Status " + str(index), with_meaning(status)))
     else:
         rows.append(("Status", "None listed"))
     created = ""
@@ -147,6 +278,63 @@ def parse_rdap(data):
     rows.extend(contact_rows)
     if not contact_rows:
         rows.append(("Registrant contact", "Redacted for privacy or not disclosed"))
+    return rows
+
+
+def parse_ip_rdap(data):
+    rows = []
+    rows.append(("WHOIS source", "IP RDAP (RIR)"))
+    handle = data.get("handle", "")
+    if handle:
+        rows.append(("Resource handle", short(handle, 120)))
+    name = data.get("name", "")
+    if name:
+        rows.append(("Net name", short(name, 120)))
+    country = data.get("country", "")
+    if country:
+        rows.append(("Net country", str(country)))
+    kind = data.get("type", "")
+    if kind:
+        rows.append(("Resource type", short(kind, 80)))
+    parent = data.get("parentHandle", "")
+    if parent:
+        rows.append(("Parent handle", short(parent, 120)))
+    start = data.get("startAddress", "")
+    end = data.get("endAddress", "")
+    if start or end:
+        rows.append(("Address range", str(start) + " - " + str(end)))
+    for block in data.get("cidr0_cidrs", []) or []:
+        if block.get("v4prefix"):
+            rows.append(("CIDR", str(block["v4prefix"])))
+        if block.get("v6prefix"):
+            rows.append(("CIDR", str(block["v6prefix"])))
+    statuses = data.get("status", []) or []
+    if statuses:
+        rows.append(("Status count", str(len(statuses))))
+        for index, status in enumerate(statuses, 1):
+            rows.append(("Status " + str(index), short(status, 120)))
+    for event in data.get("events", []) or []:
+        action = event.get("eventAction", "")
+        date = event.get("eventDate", "")
+        if action or date:
+            rows.append(("Date " + short(action or "event", 40), short(date, 60)))
+    remarks = data.get("remarks", []) or []
+    shown = 0
+    for remark in remarks:
+        if shown >= 3:
+            break
+        lines = remark.get("description", []) or []
+        text = " ".join(str(line) for line in lines).strip()
+        if text:
+            shown += 1
+            rows.append(("Remark " + str(shown), short(text, 220)))
+    entities = data.get("entities", []) or []
+    contact_rows = []
+    for entity in entities:
+        contact_rows.extend(parse_entity(entity, ""))
+    rows.extend(contact_rows)
+    if not contact_rows:
+        rows.append(("Contacts", "None disclosed"))
     return rows
 
 
@@ -205,6 +393,62 @@ def parse_vcard(vcard_array):
     return info
 
 
+def parse_date_flexible(text):
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    try:
+        candidate = cleaned
+        if "T" in candidate and candidate[-1:] in ("Z", "z"):
+            candidate = candidate[:-1] + "+00:00"
+        return datetime.datetime.fromisoformat(candidate)
+    except Exception:
+        pass
+    candidate = re.sub(r"\s+", " ", cleaned)
+    patterns = [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d-%b-%Y",
+        "%d-%b-%Y %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S %Z",
+        "%Y.%m.%d",
+        "%Y/%m/%d",
+        "%b %d %Y",
+        "%d %b %Y",
+    ]
+    for pattern in patterns:
+        try:
+            return datetime.datetime.strptime(candidate, pattern)
+        except Exception:
+            continue
+    return None
+
+
+def age_rows(created_text, expires_text):
+    rows = []
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    created = parse_date_flexible(created_text)
+    expires = parse_date_flexible(expires_text)
+    if created:
+        if created.tzinfo:
+            created = created.replace(tzinfo=None)
+        days = (now - created).days
+        rows.append(("Domain age", str(days) + " days (" + str(round(days / 365.25, 1)) + " years)"))
+    if expires:
+        if expires.tzinfo:
+            expires = expires.replace(tzinfo=None)
+        left = (expires - now).days
+        if left < 0:
+            rows.append(("Domain expiry", "Expired " + str(abs(left)) + " days ago"))
+        else:
+            rows.append(("Domain expiry", "Expires in " + str(left) + " days"))
+            if left < 30:
+                rows.append(("Expiry urgency", "Expiring soon"))
+    return rows
+
+
 def whois_query(server, text, timeout=8):
     sock = socket.create_connection((server, 43), timeout=timeout)
     try:
@@ -232,6 +476,7 @@ def fetch_whois(domain):
     servers = []
     tld = domain.rsplit(".", 1)[-1]
     referral = ""
+    iana_text = ""
     try:
         iana_text = whois_query("whois.iana.org", tld)
         match = re.search(r"whois:\s*(\S+)", iana_text)
@@ -247,6 +492,8 @@ def fetch_whois(domain):
     servers.append(referral)
     text = whois_query(referral, domain)
     second = re.search(r"Registrar WHOIS Server:\s*(\S+)", text, re.IGNORECASE)
+    if not second:
+        second = re.search(r"^\s*Whois Server:\s*(\S+)", text, re.IGNORECASE | re.MULTILINE)
     if second:
         registrar_server = second.group(1).strip()
         if registrar_server not in servers:
@@ -257,7 +504,7 @@ def fetch_whois(domain):
             if len(detail) > 200:
                 text = detail
                 servers.append(registrar_server)
-    return text, servers
+    return text, servers, iana_text
 
 
 def first_match(text, patterns):
@@ -312,7 +559,7 @@ def parse_whois_text(text):
     if statuses:
         rows.append(("Status count", str(len(statuses))))
         for index, status in enumerate(statuses, 1):
-            rows.append(("Status " + str(index), short(status, 160)))
+            rows.append(("Status " + str(index), with_meaning(status)))
     nameservers = all_matches(text, [r"^\s*name server:\s*(\S+)$", r"^\s*nserver:\s*(\S+)$"])
     if nameservers:
         rows.append(("Nameserver count", str(len(nameservers))))

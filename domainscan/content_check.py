@@ -141,6 +141,7 @@ def analyze_soup(soup, page_url, html):
     if images:
         without_alt = [img for img in images if not (img.get("alt") or "").strip()]
         rows.append(("Images without alt", str(len(without_alt))))
+        rows.append(("External images", str(count_external_refs(images, "src", page_url))))
     scripts = soup.find_all("script")
     inline = [tag for tag in scripts if not tag.get("src")]
     external = [tag.get("src", "") for tag in scripts if tag.get("src")]
@@ -157,6 +158,7 @@ def analyze_soup(soup, page_url, html):
         if "stylesheet" in [item.lower() for item in rel]:
             styles.append(tag.get("href", ""))
     rows.append(("Stylesheet count", str(len(styles))))
+    rows.append(("External stylesheets", str(count_external_refs([tag for tag in soup.find_all("link", href=True)], "href", page_url))))
     for index, href in enumerate(styles[:5], 1):
         rows.append(("Stylesheet " + str(index), short(href, 200)))
     forms = soup.find_all("form")
@@ -260,6 +262,18 @@ def form_target_rows(forms, page_url):
     for index, action in enumerate(external_forms[:3], 1):
         rows.append(("External form " + str(index), short(action, 200)))
     return rows
+
+
+def count_external_refs(tags, attr, page_url):
+    base_host = (urllib.parse.urlsplit(page_url).hostname or "").lower()
+    count = 0
+    for tag in tags:
+        value = (tag.get(attr, "") or "").strip()
+        if value.lower().startswith("http"):
+            host = (urllib.parse.urlsplit(value).hostname or "").lower()
+            if host and host != base_host:
+                count += 1
+    return count
 
 
 def count_mixed(soup):

@@ -26,12 +26,26 @@ WEB_PROBE_PORTS = {
 TIMEOUT = 2.0
 
 
+def classify_error(exc):
+    import errno
+    if isinstance(exc, ConnectionRefusedError):
+        return "closed"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "filtered"
+    code = getattr(exc, "errno", 0)
+    if code in (errno.ECONNREFUSED,):
+        return "closed"
+    if code in (errno.ETIMEDOUT, errno.EHOSTUNREACH, errno.ENETUNREACH):
+        return "filtered"
+    return "filtered"
+
+
 def probe(host, port):
     started = time.perf_counter()
     try:
         sock = socket.create_connection((host, port), timeout=TIMEOUT)
-    except Exception:
-        return {"port": port, "open": False, "ms": 0, "banner": ""}
+    except Exception as exc:
+        return {"port": port, "open": False, "ms": 0, "banner": "", "state": classify_error(exc)}
     elapsed = int((time.perf_counter() - started) * 1000)
     banner = ""
     if port in BANNER_PORTS:
@@ -46,7 +60,7 @@ def probe(host, port):
         sock.close()
     except Exception:
         pass
-    return {"port": port, "open": True, "ms": elapsed, "banner": banner}
+    return {"port": port, "open": True, "ms": elapsed, "banner": banner, "state": "open"}
 
 
 def probe_web_port(host, port, timeout=5):
@@ -95,8 +109,10 @@ def collect(host, enabled=True):
             rows.append((label, "Open (" + str(result["ms"]) + " ms)"))
             if result["banner"]:
                 rows.append((label + " banner", short(result["banner"], 160)))
+        elif result.get("state") == "closed":
+            rows.append((label, "Closed (connection refused)"))
         else:
-            rows.append((label, "Closed or filtered"))
+            rows.append((label, "Filtered (no response)"))
     web_ports = [item["port"] for item in opened if item["port"] in WEB_PROBE_PORTS]
     for port in sorted(web_ports):
         rows.append(("Port " + str(port) + " web", probe_web_port(host, port)))

@@ -80,9 +80,12 @@ def collect(apex, enabled=True):
                 combined.add(name)
     combined.discard(apex)
     rows.append(("Unique names found", str(len(combined))))
-    confirmed = verify_names(resolver, combined - set(brute), 150)
+    confirmed, excluded = verify_names(resolver, combined - set(brute), 150, wildcard_ips)
+    if excluded:
+        rows.append(("Wildcard artifacts excluded", str(excluded)))
     for name, addresses in brute.items():
         confirmed[name] = addresses
+    rows.extend(depth_rows(combined, apex))
     rows.append(("Confirmed subdomains", str(len(confirmed))))
     for index, name in enumerate(sorted(confirmed)[:60], 1):
         rows.append(("Subdomain " + str(index), name + " -> " + ", ".join(confirmed[name][:4])))
@@ -132,8 +135,9 @@ def brute_force(resolver, apex, wildcard_ips):
     return found
 
 
-def verify_names(resolver, names, cap=150):
+def verify_names(resolver, names, cap=150, wildcard_ips=None):
     confirmed = {}
+    excluded = 0
     picked = sorted(names)[:cap]
 
     def check(name):
@@ -141,15 +145,41 @@ def verify_names(resolver, names, cap=150):
             result = dns_check.query(resolver, name, "A")
         except Exception:
             return None
-        if result["records"]:
-            return (name, result["records"])
-        return None
+        if not result["records"]:
+            return None
+        if wildcard_ips and set(result["records"]) <= set(wildcard_ips):
+            return (name, None)
+        return (name, result["records"])
 
     with ThreadPoolExecutor(max_workers=10) as pool:
         for item in pool.map(check, picked):
-            if item:
+            if not item:
+                continue
+            if item[1] is None:
+                excluded += 1
+            else:
                 confirmed[item[0]] = item[1]
-    return confirmed
+    return confirmed, excluded
+
+
+def subdomain_depths(names, apex):
+    depths = {}
+    base = len((apex or "").split("."))
+    for name in names or []:
+        depth = max(len(name.split(".")) - base, 0)
+        depths[depth] = depths.get(depth, 0) + 1
+    return depths
+
+
+def depth_rows(names, apex):
+    rows = []
+    for depth in sorted(subdomain_depths(names, apex)):
+        count = subdomain_depths(names, apex)[depth]
+        if depth == 1:
+            rows.append(("Direct subdomains", str(count)))
+        else:
+            rows.append(("Level " + str(depth) + " subdomains", str(count)))
+    return rows
 
 
 def is_takeover_candidate(target):

@@ -5,25 +5,26 @@ DomainScan is a desktop tool that collects publicly available information about 
 ## What it collects
 
 - Target breakdown (normalized URL, registrable domain, subdomain, suffix)
-- DNS records (A, AAAA, CNAME with chain following, MX, NS, TXT, SOA, CAA, DS, DNSKEY, SRV, HTTPS, SVCB, TLSA, SSHFP, NAPTR)
-- DNS extras (SOA/CAA parsing, multi-resolver comparison, zone transfer test)
-- Subdomain discovery (certificate transparency, passive DNS, DNS brute-force, wildcard detection, takeover review)
+- DNS records (A, AAAA, CNAME with chain following, MX, NS, TXT, SOA, CAA, DS, DNSKEY, SRV, HTTPS, SVCB, TLSA, SSHFP, NAPTR, DNAME)
+- DNS extras (SOA/CAA/DS/DNSKEY parsing, multi-resolver comparison, zone transfer test)
+- Subdomain discovery (certificate transparency, passive DNS, DNS brute-force, wildcard detection, wildcard-artifact filtering, depth stats, takeover review)
 - Subdomain web probing (HTTP status, server and title per subdomain)
-- WHOIS / RDAP (registrar, dates, domain age, statuses, contacts, nameservers)
-- IP and network (ping, reverse DNS, ASN, ISP, geolocation)
-- BGP routing (prefix, origin ASN, announced prefixes, peers)
+- WHOIS / RDAP (authoritative TLD RDAP via IANA bootstrap, port-43 fallback with raw record, EPP status meanings, IP/RIR WHOIS, NS resolution with lame-delegation notes, TLD manager, domain age, contacts)
+- IP and network (ping, reverse DNS, ASN, ISP, geolocation with map link, dual-stack and routable checks)
+- BGP routing (prefix with size, origin ASN, announced prefixes, peers, prefix use)
 - Reputation (IPv4 blocklist checks across major DNSBLs)
-- Website (redirects, headers, cookies with flag analysis, security headers, compression, timing)
+- Website (redirects, headers, cookies with flag analysis, security headers, compression, timing, clock skew, cache validators)
 - Extra web checks (HTTP methods, TRACE, clickjacking, CORS, WAF probe, Alt-Svc, HSTS preload, IPv6, 404 handling, sensitive paths, API discovery)
 - TLS certificate (issuer, validity, SANs, fingerprints, trust, ALPN/HTTP2, legacy and TLS 1.3 probes, openssl chain and weak cipher probes)
-- Mail authentication (SPF with lookup count, DMARC, DKIM, BIMI, MTA-STS policy, TLS-RPT, MX reachability, STARTTLS, DANE)
-- Page content (title, meta tags, links, images, scripts, forms, login forms, mixed content, JS paths, HTML comments, JSON-LD, SEO basics, contacts)
+- Mail authentication (SPF with lookup count and issue detection, DMARC, DKIM, BIMI, MTA-STS policy, TLS-RPT, MX reachability, STARTTLS, DANE)
+- Page content (title, meta tags, links, images, scripts, forms, login forms, mixed content, external resource counts, JS paths, HTML comments, JSON-LD, SEO basics, contacts)
 - Mini crawler (same-site pages, titles, broken links)
 - JS analysis (endpoint extraction, secret scanning with redacted previews)
 - Technologies (server, hosting, CMS, forums, shops, JS libraries, analytics, ads, chat, payment, CDN markers)
 - Site files (robots.txt, sitemap.xml with robots fallback, security.txt, ads.txt, humans.txt, crossdomain policy, favicon with hash, manifest)
 - Web history (first and latest archive captures, active years)
-- Common TCP ports (connect check with banners and web probing on open web ports)
+- Common TCP ports (open/closed/filtered states with banners and web probing on open web ports)
+- Cross-checks (DNS vs WHOIS NS consistency, DNSSEC completeness, SOA serial verdict, SPF include validation, DMARC mailbox check, www-vs-apex, certificate coverage, cookie audit)
 
 A typical scan returns several hundred findings. Anything that cannot be resolved is reported as missing, never guessed.
 
@@ -48,7 +49,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Type a domain or URL (for example `example.com`) and press Scan.
+Type a domain or URL (for example `example.com`) and press Scan. The Tools menu offers a standalone WHOIS lookup for any domain or IP.
 
 ## Command line
 

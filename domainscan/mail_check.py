@@ -183,6 +183,11 @@ def describe_spf(txt_records):
     rows.append(("SPF DNS lookups", str(lookups) + " of max 10"))
     if lookups > 10:
         rows.append(("SPF lookup limit", "Exceeded (receivers return permerror)"))
+    issues = spf_issues(value, tokens, lookups)
+    if issues:
+        rows.append(("SPF issues", "; ".join(issues)))
+    else:
+        rows.append(("SPF issues", "None found"))
     policy = "No default policy"
     for token in tokens:
         if token.lower().endswith("all"):
@@ -209,6 +214,25 @@ def spf_lookups(tokens):
         elif low in ("a", "mx", "ptr") or low.startswith(("a:", "a/", "mx:", "mx/", "ptr:")):
             count += 1
     return count
+
+
+def spf_issues(value, tokens, lookups):
+    issues = []
+    has_all = any(token.lower().endswith("all") for token in tokens)
+    if not has_all:
+        issues.append("no default all rule")
+    if lookups > 10:
+        issues.append("too many DNS lookups")
+    if "redirect=" in value.lower() and len(tokens) > 1:
+        issues.append("redirect combined with other mechanisms")
+    for token in tokens:
+        body = token[1:] if token[:1] in "+-~?" else token
+        if body.lower() == "ptr" or body.lower().startswith("ptr:"):
+            issues.append("ptr mechanism is slow and deprecated")
+            break
+    if "+all" in [token.lower() for token in tokens] or value.lower().split()[-1:] == ["all"]:
+        issues.append("ends with permissive all")
+    return issues
 
 
 def spf_meaning(token):

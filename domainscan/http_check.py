@@ -97,6 +97,16 @@ def collect_http(fetch_url, timeout=12):
         raw_cookies = []
     rows.extend(cookie_flag_rows(raw_cookies))
     rows.extend(security_summary(response.headers))
+    rows.append(("Clock skew", clock_skew(response.headers.get("Date", ""))))
+    validators = []
+    if response.headers.get("ETag", ""):
+        validators.append("ETag")
+    if response.headers.get("Last-Modified", ""):
+        validators.append("Last-Modified")
+    if validators:
+        rows.append(("Cache validators", ", ".join(validators)))
+    else:
+        rows.append(("Cache validators", "None (no ETag or Last-Modified)"))
     html = response.text or ""
     if len(html) > MAX_HTML:
         rows.append(("HTML note", "Body truncated for analysis at " + str(MAX_HTML) + " characters"))
@@ -123,6 +133,26 @@ def parse_set_cookie(header):
             else:
                 info["samesite"] = "set"
     return info
+
+
+def clock_skew(date_str, now=None):
+    import email.utils
+    if not date_str:
+        return "No Date header"
+    try:
+        moment = email.utils.parsedate_to_datetime(date_str)
+    except Exception:
+        return "Unparseable Date header"
+    if moment.tzinfo:
+        moment = moment.replace(tzinfo=None)
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    delta = int((moment - now).total_seconds())
+    if abs(delta) > 3600:
+        return "Over 1h off (" + str(delta) + "s, review)"
+    if delta >= 0:
+        return "Server ahead by " + str(delta) + "s"
+    return "Server behind by " + str(abs(delta)) + "s"
 
 
 def cookie_flag_rows(raw_cookies):

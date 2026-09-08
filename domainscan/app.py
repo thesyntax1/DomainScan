@@ -3,7 +3,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from domainscan import __version__, helpers, history_store, profiles, scanner
+from domainscan import __version__, helpers, history_store, profiles, scanner, whois_check
 
 
 APP_TITLE = "DomainScan"
@@ -56,10 +56,13 @@ class DomainScanApp:
         scan_menu = tk.Menu(menubar, tearoff=0)
         scan_menu.add_command(label="Start Scan", command=self.start_scan)
         scan_menu.add_command(label="Compare with Previous", command=self.compare_scan)
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        tools_menu.add_command(label="WHOIS Lookup", command=self.open_whois_lookup)
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(label="About", command=self.show_about)
         menubar.add_cascade(label="File", menu=file_menu)
         menubar.add_cascade(label="Scan", menu=scan_menu)
+        menubar.add_cascade(label="Tools", menu=tools_menu)
         menubar.add_cascade(label="Help", menu=help_menu)
         self.root.configure(menu=menubar)
 
@@ -449,6 +452,53 @@ class DomainScanApp:
         self.section_box.set("Changes")
         self.apply_filter()
         self.set_detail("Compared with scan from " + str(previous["meta"].get("scanned_at", "earlier")) + ". " + str(len(changes)) + " change rows.")
+
+    def open_whois_lookup(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("WHOIS Lookup")
+        dialog.geometry("760x520")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        top = ttk.Frame(dialog, padding=10)
+        top.pack(fill=tk.X)
+        entry = ttk.Entry(top, width=46)
+        entry.pack(side=tk.LEFT, padx=(0, 8))
+        entry.insert(0, self.target_entry.get().strip() or "example.com")
+        output = tk.Text(dialog, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT, wrap=tk.WORD, font=("Consolas", 10))
+        output.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        def run_query():
+            raw = entry.get().strip()
+            if not raw:
+                return
+            output.delete("1.0", tk.END)
+            output.insert(tk.END, "Looking up " + raw + "...\n")
+            try:
+                resolved = whois_check.resolve_whois_target(raw)
+            except Exception as exc:
+                output.insert(tk.END, "Invalid target (" + exc.__class__.__name__ + ")\n")
+                return
+            if resolved["note"]:
+                output.insert(tk.END, resolved["note"] + "\n")
+
+            def worker():
+                try:
+                    result = whois_check.collect(resolved["query"], resolved["query"])
+                    lines = [key + ": " + value for key, value in result["rows"]]
+                except Exception as exc:
+                    lines = ["Lookup failed (" + exc.__class__.__name__ + ")"]
+                dialog.after(0, lambda: show_lines(lines))
+
+            def show_lines(lines):
+                output.delete("1.0", tk.END)
+                for line in lines:
+                    output.insert(tk.END, line + "\n")
+                self.set_detail("WHOIS lookup finished for " + raw + ".")
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ttk.Button(top, text="Look Up", command=run_query).pack(side=tk.LEFT)
+        entry.bind("<Return>", lambda event: run_query())
 
     def export_html(self):
         if not self.need_result():

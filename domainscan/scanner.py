@@ -2,7 +2,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from domainscan import __version__
-from domainscan import bgp_check, content_check, crawl_check, dns_check, files_check, helpers, history_check, http_check, js_check, mail_check, network_check, ports_check, reputation_check, subdomain_check, web_extra_check, whois_check
+from domainscan import bgp_check, content_check, crawl_check, cross_check, dns_check, files_check, helpers, history_check, http_check, js_check, mail_check, network_check, ports_check, reputation_check, subdomain_check, web_extra_check, whois_check
 
 
 def safe_run(func):
@@ -107,10 +107,18 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
         for future in as_completed(futures):
             sections[futures[future]] = future.result()["rows"]
 
+    emit(93, "Running cross-checks")
+    whois_ns = results["WHOIS / RDAP"].get("nameservers", []) or []
+    try:
+        cross_result = cross_check.collect(info, apex, dns_data, web, whois_ns, timeout)
+        sections["Cross-Checks"] = cross_result["rows"]
+    except Exception as exc:
+        sections["Cross-Checks"] = [("Status", "Check failed (" + exc.__class__.__name__ + ")")]
+
     emit(96, "Finishing")
     duration = time.perf_counter() - started
     ordered = {}
-    for section in ("Target", "DNS", "Subdomains", "Subdomain Web", "WHOIS / RDAP", "Network", "BGP", "Reputation", "Website", "Web Extras", "TLS", "Mail", "Content", "Crawl", "JS Analysis", "Technologies", "Site Files", "Web History", "Ports"):
+    for section in ("Target", "DNS", "Subdomains", "Subdomain Web", "WHOIS / RDAP", "Network", "BGP", "Reputation", "Website", "Web Extras", "TLS", "Mail", "Content", "Crawl", "JS Analysis", "Technologies", "Site Files", "Web History", "Ports", "Cross-Checks"):
         if section in sections:
             ordered[section] = sections[section]
     ordered["Summary"] = build_summary(info, ordered, duration)

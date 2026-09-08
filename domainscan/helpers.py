@@ -118,6 +118,11 @@ def describe_target(info):
     else:
         rows.append(("Host type", "Domain name"))
     rows.append(("Host length", str(len(host)) + " characters"))
+    try:
+        info["unicode_host"].encode("ascii")
+        rows.append(("IDN check", "ASCII only"))
+    except Exception:
+        rows.append(("IDN warning", "Non-ASCII characters present (possible homograph, review)"))
     rows.append(("Label count", str(len(labels))))
     if not info["is_ip"]:
         parts = split_domain(host, info["is_ip"])
