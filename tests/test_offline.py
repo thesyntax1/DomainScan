@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import a11y_check, bgp_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, typo_check, wayback_check, web_extra_check, whois_check
+from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -1903,3 +1903,368 @@ class SeoCollectTests(unittest.TestCase):
         self.assertGreater(len(rows), 10)
         data = rows_to_dict(rows)
         self.assertEqual(data["Sitemap reference"], "No sitemap found")
+
+
+class HttpExtraTests(unittest.TestCase):
+    def test_hsts_readiness(self):
+        data = rows_to_dict(http_check.hsts_rows("max-age=63072000; includeSubDomains; preload"))
+        self.assertEqual(data["HSTS readiness"], "Meets preload requirements")
+        self.assertEqual(data["HSTS subdomains"], "Covered")
+
+    def test_hsts_weak(self):
+        data = rows_to_dict(http_check.hsts_rows("max-age=60"))
+        self.assertIn("weak", data["HSTS duration"])
+        self.assertEqual(data["HSTS subdomains"], "Not covered")
+
+    def test_hsts_invalid(self):
+        data = rows_to_dict(http_check.hsts_rows("includeSubDomains"))
+        self.assertIn("invalid", data["HSTS max-age"])
+
+    def test_report_only(self):
+        data = rows_to_dict(http_check.security_summary({"Content-Security-Policy-Report-Only": "default-src 'self'; report-uri /r"}))
+        self.assertIn("not enforced", data["CSP report-only"])
+
+    def test_self_signed(self):
+        cert = {"subject": ((("commonName", "x"),),), "issuer": ((("commonName", "x"),),), "subjectAltName": []}
+        data = rows_to_dict(http_check.parse_cert(cert, b"", "x"))
+        self.assertTrue(data["Self-signed"].startswith("Yes"))
+        self.assertIn("deprecated", data["SAN verdict"])
+
+    def test_wildcard_san(self):
+        cert = {"subject": ((("commonName", "x"),),), "issuer": ((("commonName", "y"),),),
+                "subjectAltName": [("DNS", "*.example.com"), ("DNS", "example.com")]}
+        data = rows_to_dict(http_check.parse_cert(cert, b"", "example.com"))
+        self.assertEqual(data["Self-signed"], "No")
+        self.assertIn("*.example.com", data["Wildcard SANs"])
+
+    def test_sct_verdict(self):
+        text = "CT Precertificate SCTs:\n    Signed Certificate Timestamp:\n    Signed Certificate Timestamp:\n"
+        data = rows_to_dict(http_check.parse_openssl_text(text))
+        self.assertIn("Meets", data["SCT verdict"])
+
+
+class DnsExtraTests(unittest.TestCase):
+    def test_nsec_modes(self):
+        self.assertIn("enumerable", rows_to_dict(dns_check.nsec_mode_rows(["a"], []))["NSEC mode"])
+        self.assertIn("NSEC3", rows_to_dict(dns_check.nsec_mode_rows([], ["1 0 10 X"]))["NSEC mode"])
+        self.assertIn("unsigned", rows_to_dict(dns_check.nsec_mode_rows([], []))["NSEC mode"])
+
+    def test_identity_probes_fail_soft(self):
+        self.assertEqual(dns_check.nsid_query("127.0.0.1", timeout=1), "")
+        self.assertEqual(dns_check.version_query("127.0.0.1", timeout=1), "")
+
+
+class MailExtraTests(unittest.TestCase):
+    def test_vrfy_verdicts(self):
+        self.assertIn("enumeration", mail_check.vrfy_verdict("252 ok", "VRFY"))
+        self.assertIn("disabled", mail_check.vrfy_verdict("502 no", "EXPN"))
+        self.assertIn("550", mail_check.vrfy_verdict("550 denied", "VRFY"))
+
+    def test_mta_sts_mx_match(self):
+        rows = mail_check.mta_sts_mx_match(["*.example.com"], ["mx.example.com"])
+        self.assertIn("match", rows_to_dict(rows)["MTA-STS coverage"])
+        rows = mail_check.mta_sts_mx_match(["*.example.com"], ["rogue.example.org"])
+        self.assertIn("rogue.example.org", rows_to_dict(rows)["MTA-STS coverage"])
+
+    def test_forward_confirm_skip(self):
+        self.assertEqual(mail_check.mx_forward_confirm("No PTR record", "1.2.3.4"), "Skipped (no PTR)")
+
+
+class FilesExtraTests(unittest.TestCase):
+    def test_sitemap_freshness(self):
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        self.assertIn("Fresh", files_check.sitemap_freshness(today))
+        self.assertIn("Stale", files_check.sitemap_freshness("2000-01-01"))
+
+    def test_parse_humans(self):
+        data = rows_to_dict(files_check.parse_humans("/* TEAM */\nJohn <john@example.com>\nLast update: 2024-01-01"))
+        self.assertIn("john@example.com", data["humans.txt emails"])
+        self.assertEqual(data["humans.txt updated"], "2024-01-01")
+
+    def test_parse_sitemap_returns_urls(self):
+        result = {"ok": True, "text": "<urlset><url><loc>https://a.example/x</loc></url></urlset>", "size": 10}
+        parsed = files_check.parse_sitemap(result)
+        self.assertEqual(parsed["urls"], ["https://a.example/x"])
+        self.assertIn("Sitemap URL count", rows_to_dict(parsed["rows"]))
+
+
+class VulnDbTests(unittest.TestCase):
+    def test_jquery_vulnerable(self):
+        hits = content_check.vuln_lookup("jQuery", "1.12.4")
+        self.assertTrue(hits)
+        self.assertIn("XSS", hits)
+
+    def test_jquery_clean(self):
+        self.assertEqual(content_check.vuln_lookup("jQuery", "3.6.0"), "")
+
+    def test_lodash_cve(self):
+        self.assertIn("CVE-2020-8203", content_check.vuln_lookup("Lodash", "4.17.15"))
+        self.assertEqual(content_check.vuln_lookup("Lodash", "4.17.21"), "")
+
+    def test_eol_flagged(self):
+        self.assertIn("end-of-life", content_check.vuln_lookup("AngularJS", "1.6.0"))
+        self.assertIn("XSS", content_check.vuln_lookup("Bootstrap", "3.4.1"))
+
+    def test_version_below(self):
+        self.assertTrue(content_check.version_below("1.9.0", "2.0.0"))
+        self.assertFalse(content_check.version_below("3.6.0", "3.6.0"))
+        self.assertFalse(content_check.version_below("abc", "3.0.0"))
+
+
+class JsExtraTests(unittest.TestCase):
+    def test_postmessage(self):
+        texts = [("a.js", "addEventListener('message', function(e) { document.write(e.data); })")]
+        data = rows_to_dict(js_check.postmessage_rows(texts))
+        self.assertIn("without origin", data["postMessage origin check"])
+
+    def test_storage(self):
+        texts = [("a.js", "localStorage.setItem('auth_token', value);")]
+        rows = js_check.storage_rows(texts)
+        data = rows_to_dict(rows)
+        self.assertIn("1 suspicious", data["Secrets in web storage"])
+        self.assertIn("auth_token", str(rows))
+
+    def test_debug(self):
+        texts = [("a.js", "console.log(1); console.log(2); debugger;")]
+        data = rows_to_dict(js_check.debug_rows(texts))
+        self.assertIn("2 console calls", data["Debug leftovers"])
+        self.assertIn("1 debugger", data["Debug leftovers"])
+
+    def test_endpoint_keys(self):
+        data = rows_to_dict(js_check.endpoint_key_rows(["/api/x?token=abc", "api_key='ZZZ'"]))
+        self.assertIn("2 endpoints", data["Keys in URLs"])
+
+    def test_lib_versions(self):
+        texts = [("a.js", "angular.js/1.6.0/angular.min.js handlebars-4.0.0.js")]
+        data = rows_to_dict(js_check.library_version_rows(texts))
+        self.assertIn("end-of-life", data["JS library risk: AngularJS"])
+        self.assertIn("CVE", data["JS library risk: Handlebars"])
+
+
+class ContentExtraTests(unittest.TestCase):
+    def test_base_tabnabbing_iframe(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><base href="https://evil.example/"></head><body><a href="https://x.example" target="_blank">x</a><iframe src="https://y.example"></iframe></body></html>', "html.parser")
+        data = rows_to_dict(content_check.base_tag_rows(soup, "https://example.com/"))
+        self.assertIn("evil.example", data["Base tag hijack"])
+        self.assertIn("noopener", rows_to_dict(content_check.tabnabbing_rows(soup))["Tabnabbing risk"])
+        self.assertIn("1 of 1", rows_to_dict(content_check.iframe_sandbox_rows(soup))["Unsandboxed iframes"])
+
+    def test_refresh_duplicate_deprecated(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><meta http-equiv="refresh" content="5;url=https://evil.example/"></head><body><div id="a"></div><div id="a"></div><font>x</font></body></html>', "html.parser")
+        data = rows_to_dict(content_check.refresh_rows(soup))
+        self.assertIn("absolute URL", data["Meta refresh target"])
+        self.assertIn("1: a", rows_to_dict(content_check.duplicate_id_rows(soup))["Duplicate IDs"])
+        self.assertIn("font", rows_to_dict(content_check.deprecated_tag_rows(soup))["Deprecated tags"])
+
+    def test_autocomplete(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<form><input type="password"></form>', "html.parser")
+        data = rows_to_dict(content_check.autocomplete_rows(soup))
+        self.assertEqual(data["Password autocomplete"], "0 of 1 disable storage")
+
+
+class SeoExtraTests(unittest.TestCase):
+    def test_blocks_all(self):
+        self.assertTrue(seo_check.blocks_all_crawlers("User-agent: *\nDisallow: /"))
+        self.assertFalse(seo_check.blocks_all_crawlers("User-agent: *\nDisallow: /admin/"))
+
+    def test_title_h1(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup("<html><head><title>Same</title></head><body><h1>Same</h1></body></html>", "html.parser")
+        self.assertIn("Identical", rows_to_dict(seo_check.title_h1_rows(soup))["Title vs H1"])
+
+    def test_discovery(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><link rel="amphtml" href="/amp"><link rel="alternate" type="application/rss+xml" href="/feed"><link rel="next" href="/p2"></head></html>', "html.parser")
+        data = rows_to_dict(seo_check.discovery_rows(soup))
+        self.assertIn("/amp", data["AMP version"])
+        self.assertEqual(data["Feeds discovered"], "1")
+        self.assertIn("prev/next", data["Pagination"])
+
+
+class A11yExtraTests(unittest.TestCase):
+    def test_hidden_focus(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<div aria-hidden="true"><a href="/x">y</a></div>', "html.parser")
+        data = rows_to_dict(a11y_check.hidden_focus_rows(soup))
+        self.assertTrue(data["Hidden focusable elements"].startswith("1"))
+
+    def test_motion(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup("<marquee>x</marquee><video autoplay></video>", "html.parser")
+        data = rows_to_dict(a11y_check.motion_rows(soup))
+        self.assertIn("1 marquee", data["Auto-moving content"])
+        self.assertEqual(data["Autoplay videos"], "1")
+
+    def test_group(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<input type="radio" name="a">', "html.parser")
+        data = rows_to_dict(a11y_check.group_rows(soup))
+        self.assertIn("No fieldset", data["Group verdict"])
+
+
+class PerfExtraTests(unittest.TestCase):
+    def test_dom_verdict(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup("<html><body><p>x</p></body></html>", "html.parser")
+        self.assertEqual(rows_to_dict(perf_check.dom_verdict_rows(soup))["DOM verdict"], "Reasonable")
+
+    def test_preconnect_coverage(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><link rel="preconnect" href="https://cdn.example/"></head><body><script src="https://cdn.example/a.js"></script><script src="https://other.example/b.js"></script></body></html>', "html.parser")
+        data = rows_to_dict(perf_check.preconnect_coverage_rows(soup, "https://example.com/"))
+        self.assertEqual(data["Preconnect coverage"], "1 of 2 third-party hosts")
+        self.assertIn("other.example", data["Missing preconnect"])
+
+
+class PrivacyExtraTests(unittest.TestCase):
+    def test_client_storage(self):
+        data = rows_to_dict(privacy_check.client_storage_rows("localStorage.setItem(1); navigator.sendBeacon(u);"))
+        self.assertIn("localStorage", data["Client storage APIs"])
+        self.assertIn("sendBeacon", data["Client storage APIs"])
+
+    def test_pixels(self):
+        data = rows_to_dict(privacy_check.pixel_rows('<img src="x" width="1" height="1"><img src="y">'))
+        self.assertTrue(data["Tracking pixels"].startswith("1"))
+
+
+class TypoExtraTests(unittest.TestCase):
+    def test_homoglyph(self):
+        variants = typo_check.homoglyph_variants("paypal")
+        self.assertTrue(variants)
+        self.assertTrue(all(item.startswith("xn--") for item in variants))
+
+    def test_generate_includes_punycode(self):
+        self.assertTrue(any("xn--" in item for item in typo_check.generate_variants("example.com")))
+
+
+class WhoisLockTests(unittest.TestCase):
+    def test_locks_set(self):
+        data = rows_to_dict(whois_check.lock_rows(["clientTransferProhibited x", "serverDeleteProhibited x"]))
+        self.assertTrue(data["Transfer lock"].startswith("Set"))
+        self.assertIn("Partial", data["Update/delete lock"])
+
+    def test_locks_missing(self):
+        data = rows_to_dict(whois_check.lock_rows(["ok x"]))
+        self.assertIn("Not set", data["Transfer lock"])
+
+
+class WaybackExtraTests(unittest.TestCase):
+    def test_format_bytes(self):
+        self.assertEqual(wayback_check.format_bytes(1536), "1.5 KB")
+        self.assertEqual(wayback_check.format_bytes(5 * 1024 * 1024), "5.0 MB")
+
+
+class TakeoverTests(unittest.TestCase):
+    def test_body_match(self):
+        self.assertEqual(subdomain_check.match_takeover_body("NoSuchBucket error"), "AWS S3")
+
+    def test_body_no_match(self):
+        self.assertEqual(subdomain_check.match_takeover_body("<html>normal</html>"), "")
+
+
+class ThreatIntelTests(unittest.TestCase):
+    def test_urlscan_verdicts(self):
+        payload = {"total": 2, "results": [
+            {"_id": "abc", "verdicts": {"overall": {"malicious": True}}, "page": {"ip": "1.2.3.4", "country": "US"}, "task": {"time": "2024-01-01T00:00:00"}},
+            {"_id": "def", "verdicts": {"overall": {"score": 10}}, "page": {"ip": "1.2.3.4"}, "task": {"time": "2024-02-01T00:00:00"}},
+        ]}
+
+        class FakeResponse:
+            def json(self):
+                return payload
+
+        with patch("requests.get", return_value=FakeResponse()):
+            data = rows_to_dict(threat_check.urlscan_rows("example.com", 5))
+        self.assertIn("1 malicious", data["urlscan.io verdicts"])
+        self.assertEqual(data["urlscan.io first seen"], "2024-01-01")
+
+    def test_urlscan_failure(self):
+        with patch("requests.get", side_effect=RuntimeError("down")):
+            data = rows_to_dict(threat_check.urlscan_rows("example.com", 5))
+        self.assertIn("Query failed", data["urlscan.io"])
+
+
+class CommonCrawlTests(unittest.TestCase):
+    def test_summarize(self):
+        captures = [
+            {"url": "https://example.com/a", "mime": "text/html", "length": "100"},
+            {"url": "https://sub.example.com/b", "mime": "text/html", "length": "200"},
+        ]
+        data = rows_to_dict(commoncrawl_check.summarize(captures))
+        self.assertIn("2 unique", data["Common Crawl URLs"])
+        self.assertEqual(commoncrawl_check.format_bytes(300), "300 bytes")
+
+
+class CliWatchTests(unittest.TestCase):
+    def test_parser_watch_args(self):
+        import main as entry
+        args = entry.build_parser().parse_args(["--watch", "example.com", "--interval", "60", "--rounds", "3"])
+        self.assertEqual(args.watch, "example.com")
+        self.assertEqual(args.interval, 60)
+        self.assertEqual(args.rounds, 3)
+        args = entry.build_parser().parse_args(["--history", "example.com"])
+        self.assertEqual(args.history, "example.com")
+        args = entry.build_parser().parse_args(["--compare", "example.com"])
+        self.assertEqual(args.compare, "example.com")
+
+    def test_show_history_empty(self):
+        import main as entry
+        from unittest import mock
+        with mock.patch.object(history_store, "list_runs", return_value=[]):
+            self.assertEqual(entry.show_history("example.com"), 0)
+
+    def test_show_history_lists(self):
+        import io
+        import main as entry
+        from contextlib import redirect_stdout
+        from unittest import mock
+        fake = {"meta": {"scanned_at": "2024-01-01", "findings": 5}, "target": {"host": "example.com"}, "sections": {}}
+        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/a.json"]):
+            with mock.patch.object(history_store, "load_run", return_value=fake):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = entry.show_history("example.com")
+        self.assertEqual(code, 0)
+        self.assertIn("2024-01-01", buffer.getvalue())
+
+    def test_show_compare_needs_two(self):
+        import main as entry
+        from unittest import mock
+        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/a.json"]):
+            self.assertEqual(entry.show_compare("example.com"), 1)
+
+    def test_show_compare_diffs(self):
+        import io
+        import main as entry
+        from contextlib import redirect_stdout
+        from unittest import mock
+        old = {"meta": {"scanned_at": "old", "findings": 1}, "target": {"host": "example.com"}, "sections": {"DNS": [("A", "1.1.1.1")]}}
+        new = {"meta": {"scanned_at": "new", "findings": 1}, "target": {"host": "example.com"}, "sections": {"DNS": [("A", "2.2.2.2")]}}
+        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/new.json", "/tmp/old.json"]):
+            with mock.patch.object(history_store, "load_run", side_effect=[new, old]):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = entry.show_compare("example.com")
+        self.assertEqual(code, 0)
+        self.assertIn("Changed", buffer.getvalue())
+
+
+class PruneTests(unittest.TestCase):
+    def test_prune_old(self):
+        import time
+        directory = tempfile.mkdtemp()
+        try:
+            for index in range(5):
+                path = os.path.join(directory, "example.com-2024010" + str(index) + "-000000.json")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("{}")
+                stamp = time.time() - (5 - index)
+                os.utime(path, (stamp, stamp))
+            removed = history_store.prune_old("example.com", keep=2, directory=directory)
+            self.assertEqual(removed, 3)
+            self.assertEqual(len(history_store.list_runs("example.com", directory=directory)), 2)
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)

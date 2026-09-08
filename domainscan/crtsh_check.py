@@ -12,12 +12,52 @@ def collect(apex, timeout=12):
         entries = fetch_crtsh(apex, timeout)
     except Exception as exc:
         rows.append(("Certificate history", "crt.sh query failed (" + exc.__class__.__name__ + ")"))
-        return {"rows": rows}
-    if not entries:
+        entries = []
+    if entries:
+        rows.extend(summarize(entries, apex))
+    spotter = []
+    try:
+        spotter = fetch_certspotter(apex, timeout)
+        rows.extend(spotter_rows(spotter, apex))
+    except Exception as exc:
+        rows.append(("Cert Spotter", "Query failed (" + exc.__class__.__name__ + ")"))
+    if not entries and not spotter:
         rows.append(("Certificates found", "None in CT logs"))
-        return {"rows": rows}
-    rows.extend(summarize(entries, apex))
     return {"rows": rows}
+
+
+def fetch_certspotter(apex, timeout):
+    import requests
+    url = "https://api.certspotter.com/v1/issuances"
+    params = {"domain": apex, "expand": "dns_names,issuer"}
+    headers = {"User-Agent": BROWSER_UA}
+    response = requests.get(url, params=params, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return response.json() or []
+
+
+def spotter_rows(issuances, apex):
+    rows = []
+    if not issuances:
+        rows.append(("Cert Spotter", "No issuances found"))
+        return rows
+    rows.append(("Cert Spotter issuances", str(len(issuances))))
+    issuers = {}
+    names = set()
+    for item in issuances:
+        issuer = ((item.get("issuer", {}) or {}).get("name", "")) or "Unknown"
+        issuers[issuer] = issuers.get(issuer, 0) + 1
+        for dns_name in item.get("dns_names", []) or []:
+            clean = str(dns_name).strip().lower().rstrip(".")
+            if clean:
+                names.add(clean)
+    for issuer, count in sorted(issuers.items(), key=lambda item: -item[1])[:5]:
+        rows.append(("Spotter issuer: " + short(issuer, 70), str(count)))
+    rows.append(("Spotter names", str(len(names))))
+    outside = sorted(name for name in names if not name.endswith(apex.lower()) and apex.lower() not in name.lstrip("*."))
+    if outside:
+        rows.append(("Spotter outside names", str(len(outside)) + ": " + short(", ".join(outside[:5]), 180)))
+    return rows
 
 
 def fetch_crtsh(apex, timeout):

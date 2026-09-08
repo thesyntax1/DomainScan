@@ -18,6 +18,8 @@ def collect(web, html, page_url):
     rows.extend(weight_rows(soup, html, page_url))
     rows.extend(blocking_rows(soup))
     rows.extend(image_perf_rows(soup))
+    rows.extend(dom_verdict_rows(soup))
+    rows.extend(preconnect_coverage_rows(soup, page_url))
     rows.append(("Performance score", score(web, soup, html)))
     return {"rows": rows}
 
@@ -95,6 +97,12 @@ def weight_rows(soup, html, page_url):
         rows.append(("Third-party sample", short(", ".join(sorted(third)[:8]), 200)))
     requests = len(scripts) + len(styles) + len(soup.find_all("img")) + len(iframes) + 1
     rows.append(("Estimated requests", "About " + str(requests)))
+    if requests > 100:
+        rows.append(("Request verdict", "Over 100 (poor)"))
+    elif requests > 50:
+        rows.append(("Request verdict", "Over 50 (needs improvement)"))
+    else:
+        rows.append(("Request verdict", "Reasonable"))
     return rows
 
 
@@ -140,6 +148,45 @@ def image_perf_rows(soup):
     rows.append(("Modern formats", str(len(modern)) + " webp/avif"))
     pictures = soup.find_all("picture")
     rows.append(("Picture elements", str(len(pictures))))
+    return rows
+
+
+def dom_verdict_rows(soup):
+    rows = []
+    count = len(soup.find_all(True))
+    rows.append(("DOM nodes", str(count)))
+    if count > 3000:
+        rows.append(("DOM verdict", "Over 3000 nodes (poor)"))
+    elif count > 1500:
+        rows.append(("DOM verdict", "Over 1500 nodes (needs improvement)"))
+    else:
+        rows.append(("DOM verdict", "Reasonable"))
+    return rows
+
+
+def preconnect_coverage_rows(soup, page_url):
+    rows = []
+    host = page_host(page_url)
+    third = set()
+    for tag in soup.find_all(["script", "link", "img"]):
+        src = tag.get("src", "") or tag.get("href", "")
+        if src.lower().startswith("http"):
+            other = (urllib.parse.urlsplit(src).hostname or "").lower()
+            if other and other != host:
+                third.add(other)
+    if not third:
+        return rows
+    connected = set()
+    for tag in soup.find_all("link", attrs={"rel": "preconnect"}):
+        href = tag.get("href", "")
+        other = (urllib.parse.urlsplit(href).hostname or "").lower()
+        if other:
+            connected.add(other)
+    covered = len(third & connected)
+    rows.append(("Preconnect coverage", str(covered) + " of " + str(len(third)) + " third-party hosts"))
+    missing = sorted(third - connected)[:5]
+    if missing:
+        rows.append(("Missing preconnect", short(", ".join(missing), 180)))
     return rows
 
 

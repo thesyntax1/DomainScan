@@ -80,6 +80,9 @@ def collect(html, page_url, headers=None, cookies=None):
         rows.append(("Trackers detected", "None from the built-in list"))
     rows.extend(referrer_rows(headers or {}))
     rows.extend(fingerprint_rows(html))
+    rows.extend(client_storage_rows(html))
+    rows.extend(pixel_rows(html))
+    rows.extend(cloaking_rows(third))
     rows.extend(cookie_rows(cookies or []))
     rows.extend(consent_rows(html))
     return {"rows": rows}
@@ -114,6 +117,74 @@ def match_trackers(hosts):
                 found[host] = vendor
                 break
     return found
+
+
+def client_storage_rows(html):
+    rows = []
+    blob = html or ""
+    found = []
+    if "localStorage" in blob:
+        found.append("localStorage")
+    if "sessionStorage" in blob:
+        found.append("sessionStorage")
+    if "indexedDB" in blob:
+        found.append("IndexedDB")
+    if "sendBeacon" in blob:
+        found.append("sendBeacon")
+    if found:
+        rows.append(("Client storage APIs", ", ".join(found) + " referenced"))
+    else:
+        rows.append(("Client storage APIs", "None referenced"))
+    return rows
+
+
+def pixel_rows(html):
+    rows = []
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html or "", "html.parser")
+    except Exception:
+        return rows
+    pixels = 0
+    for img in soup.find_all("img"):
+        width = str(img.get("width", "")).strip()
+        height = str(img.get("height", "")).strip()
+        if width in ("0", "1") and height in ("0", "1"):
+            pixels += 1
+    rows.append(("Tracking pixels", str(pixels) + " tiny (0/1px) images"))
+    return rows
+
+
+def cloaking_rows(hosts):
+    rows = []
+    if not hosts:
+        return rows
+    try:
+        from domainscan import dns_check
+        if not dns_check.HAS_DNSPYTHON:
+            return rows
+        resolver = dns_check.make_resolver()
+    except Exception:
+        return rows
+    cloaked = []
+    for host in sorted(hosts)[:8]:
+        try:
+            result = dns_check.query(resolver, host, "CNAME")
+        except Exception:
+            continue
+        for record in result["records"]:
+            target = record.rstrip(".").lower()
+            for domain, vendor in TRACKERS.items():
+                if target == domain or target.endswith("." + domain):
+                    cloaked.append((host, vendor))
+                    break
+    if cloaked:
+        rows.append(("CNAME cloaking", str(len(cloaked)) + " first-party hosts hide trackers"))
+        for host, vendor in cloaked[:5]:
+            rows.append(("Cloaked: " + short(host, 80), vendor))
+    else:
+        rows.append(("CNAME cloaking", "None detected on sampled hosts"))
+    return rows
 
 
 def referrer_rows(headers):

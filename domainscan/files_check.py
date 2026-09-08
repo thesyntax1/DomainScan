@@ -24,9 +24,11 @@ def collect(base_url, timeout=10):
             sitemap = fetch(session, sitemap_url, timeout)
         except Exception:
             pass
-        rows.extend(parse_sitemap(sitemap, "sitemap (robots)"))
+        parsed = parse_sitemap(sitemap, "sitemap (robots)")
     else:
-        rows.extend(parse_sitemap(sitemap))
+        parsed = parse_sitemap(sitemap)
+    rows.extend(parsed["rows"])
+    sitemap_urls = parsed["urls"]
     security = fetch(session, base_url + "/.well-known/security.txt", timeout)
     if not security["ok"]:
         fallback = fetch(session, base_url + "/security.txt", timeout)
@@ -38,11 +40,23 @@ def collect(base_url, timeout=10):
         rows.extend(parse_security(security, "security.txt", base_url))
     ads = fetch(session, base_url + "/ads.txt", timeout)
     rows.extend(parse_ads(ads))
+    app_ads = fetch(session, base_url + "/app-ads.txt", timeout)
+    if app_ads["ok"]:
+        entries = [line.strip() for line in app_ads["text"].splitlines() if line.strip() and not line.strip().startswith("#")]
+        rows.append(("app-ads.txt", "Present (" + str(len(entries)) + " entries)"))
     humans = fetch(session, base_url + "/humans.txt", timeout)
     if humans["ok"]:
         rows.append(("humans.txt", "Present (" + str(humans["size"]) + " bytes)"))
+        rows.extend(parse_humans(humans["text"]))
     else:
         rows.append(("humans.txt", describe_missing(humans)))
+    browserconfig = fetch(session, base_url + "/browserconfig.xml", timeout)
+    if browserconfig["ok"]:
+        rows.append(("browserconfig.xml", "Present (" + str(browserconfig["size"]) + " bytes)"))
+    llms = fetch(session, base_url + "/llms.txt", timeout)
+    if llms["ok"]:
+        lines = [line.strip() for line in llms["text"].splitlines() if line.strip()]
+        rows.append(("llms.txt", "Present (" + str(len(lines)) + " lines, AI crawler guidance)"))
     crossdomain = fetch(session, base_url + "/crossdomain.xml", timeout)
     rows.extend(parse_crossdomain(crossdomain))
     clientaccess = fetch(session, base_url + "/clientaccesspolicy.xml", timeout)
@@ -63,7 +77,24 @@ def collect(base_url, timeout=10):
     rows.extend(find_manifest(session, base_url, timeout))
     rows.extend(well_known_rows(session, base_url, timeout))
     rows.extend(cms_version_rows(session, base_url, timeout))
-    return {"rows": rows}
+    return {"rows": rows, "sitemap_urls": sitemap_urls}
+
+
+def parse_humans(text):
+    rows = []
+    emails = []
+    for match in re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text or ""):
+        if match not in emails:
+            emails.append(match)
+    if emails:
+        rows.append(("humans.txt emails", str(len(emails)) + ": " + short(", ".join(emails[:5]), 200)))
+    for field in ("TEAM", "THANKS", "SITE"):
+        if field in (text or ""):
+            rows.append(("humans.txt " + field.lower(), "Section present"))
+    match = re.search(r"Last update:\s*(.+)", text or "", re.IGNORECASE)
+    if match:
+        rows.append(("humans.txt updated", short(match.group(1).strip(), 80)))
+    return rows
 
 
 def parse_ads(result):
@@ -244,6 +275,8 @@ def parse_robots(result):
         if low.startswith("user-agent:") and ":" in line:
             agents.append(line.split(":", 1)[1].strip())
     rows.append(("robots.txt", "Present (" + str(result["size"]) + " bytes)"))
+    if result["size"] > 500000:
+        rows.append(("robots.txt size", "Over 500 KB (unusually large, review)"))
     rows.append(("robots.txt rules", str(len(rules)) + " lines"))
     rows.append(("robots.txt user-agents", str(len(set(agents)))))
     rows.append(("robots.txt allow count", str(len(allows))))
@@ -288,7 +321,7 @@ def parse_sitemap(result, label="sitemap.xml"):
     rows = []
     if not result["ok"]:
         rows.append((label, describe_missing(result)))
-        return rows
+        return {"rows": rows, "urls": []}
     locations = re.findall(r"<loc>(.*?)</loc>", result["text"], re.IGNORECASE | re.DOTALL)
     locations = [re.sub(r"\s+", "", item) for item in locations if item.strip()]
     rows.append((label, "Present (" + str(result["size"]) + " bytes)"))
@@ -303,7 +336,22 @@ def parse_sitemap(result, label="sitemap.xml"):
     stamps = sorted(item.strip() for item in stamps if item.strip())
     if stamps:
         rows.append(("Sitemap lastmod", str(len(stamps)) + " dated, oldest " + stamps[0][:10] + ", newest " + stamps[-1][:10]))
-    return rows
+        rows.append(("Sitemap freshness", sitemap_freshness(stamps[-1][:10])))
+    return {"rows": rows, "urls": locations}
+
+
+def sitemap_freshness(newest):
+    import datetime
+    try:
+        day = datetime.datetime.strptime(newest, "%Y-%m-%d")
+    except Exception:
+        return "Unparseable date"
+    age = (datetime.datetime.now() - day).days
+    if age < 0:
+        return "Newest entry is in the future (clock issue?)"
+    if age > 365:
+        return "Stale (newest entry " + str(age) + " days old)"
+    return "Fresh (newest entry " + str(age) + " days old)"
 
 
 def parse_security(result, label="security.txt", base_url=""):
@@ -373,6 +421,34 @@ def find_manifest(session, base_url, timeout):
                 rows.append(("Manifest " + label.lower(), short(data[key], 120)))
         icons = data.get("icons", []) or []
         rows.append(("Manifest icons", str(len(icons))))
+        rows.extend(verify_manifest_icons(session, base_url, path, icons, timeout))
         return rows
     rows.append(("Web manifest", "Not found"))
+    return rows
+
+
+def verify_manifest_icons(session, base_url, manifest_path, icons, timeout):
+    rows = []
+    if not icons:
+        return rows
+    base_dir = manifest_path.rsplit("/", 1)[0]
+    ok_count = 0
+    checked = 0
+    for icon in icons[:5]:
+        src = (icon or {}).get("src", "")
+        if not src:
+            continue
+        checked += 1
+        if src.startswith("http"):
+            url = src
+        else:
+            url = base_url + base_dir + "/" + src.lstrip("/")
+        try:
+            response = session.head(url, timeout=timeout, allow_redirects=True)
+            if response.status_code == 200:
+                ok_count += 1
+        except Exception:
+            continue
+    if checked:
+        rows.append(("Manifest icons reachable", str(ok_count) + " of " + str(checked) + " sampled OK"))
     return rows

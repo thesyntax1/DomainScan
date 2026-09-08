@@ -359,6 +359,27 @@ def x_header_inventory(headers):
     return rows
 
 
+def hsts_rows(value):
+    rows = []
+    low = str(value or "").lower()
+    match = re.search(r"max-age\s*=\s*(\d+)", low)
+    age = 0
+    if match:
+        age = int(match.group(1))
+        rows.append(("HSTS max-age", str(age) + " seconds (~" + str(age // 86400) + " days)"))
+        if age < 86400:
+            rows.append(("HSTS duration", "Under 1 day (weak)"))
+    else:
+        rows.append(("HSTS max-age", "Missing (header is invalid)"))
+    if "includesubdomains" in low:
+        rows.append(("HSTS subdomains", "Covered"))
+    else:
+        rows.append(("HSTS subdomains", "Not covered"))
+    if age >= 31536000 and "includesubdomains" in low and "preload" in low:
+        rows.append(("HSTS readiness", "Meets preload requirements"))
+    return rows
+
+
 def security_summary(headers):
     rows = []
     present = 0
@@ -376,9 +397,13 @@ def security_summary(headers):
             rows.append(("HSTS preload", "Enabled"))
         else:
             rows.append(("HSTS preload", "Not enabled"))
+        rows.extend(hsts_rows(hsts))
     csp = headers.get("Content-Security-Policy", "")
     if csp:
         rows.extend(parse_csp(csp))
+    report_only = headers.get("Content-Security-Policy-Report-Only", "")
+    if report_only:
+        rows.append(("CSP report-only", "Present (" + str(len(report_only.split(";"))) + " directives, not enforced)"))
     rows.extend(parse_permissions_policy(headers.get("Permissions-Policy", "")))
     rows.extend(parse_link_header(headers.get("Link", "")))
     rows.extend(parse_server_timing(headers.get("Server-Timing", "")))
@@ -603,6 +628,10 @@ def parse_openssl_text(text):
     if "CT Precertificate SCTs" in text:
         count = len(re.findall(r"Signed Certificate Timestamp:", text))
         rows.append(("Embedded SCTs", str(count)))
+        if count >= 2:
+            rows.append(("SCT verdict", "Meets transparency requirements"))
+        else:
+            rows.append(("SCT verdict", "Only 1 embedded (relies on OCSP/TLS delivery too)"))
     else:
         rows.append(("Embedded SCTs", "None (transparency via OCSP or other)"))
     if "1.3.6.1.5.5.7.1.24" in text or "OCSP Requirement" in text or "status_request" in text:
@@ -807,9 +836,19 @@ def parse_cert(cert, der, host):
     except Exception:
         rows.append(("Valid from", str(cert.get("notBefore", ""))))
         rows.append(("Valid until", str(cert.get("notAfter", ""))))
+    if cert.get("subject") and cert.get("subject") == cert.get("issuer"):
+        rows.append(("Self-signed", "Yes (subject matches issuer, browsers distrust)"))
+    else:
+        rows.append(("Self-signed", "No"))
     sans = cert.get("subjectAltName", []) or []
     dns_names = [value for kind, value in sans if kind == "DNS"]
     rows.append(("SAN count", str(len(dns_names))))
+    if not dns_names:
+        rows.append(("SAN verdict", "No DNS SANs (CN fallback is deprecated)"))
+    else:
+        wildcards = [name for name in dns_names if name.startswith("*.")]
+        if wildcards:
+            rows.append(("Wildcard SANs", str(len(wildcards)) + ": " + short(", ".join(wildcards[:5]), 160)))
     for index, value in enumerate(dns_names[:20], 1):
         rows.append(("SAN " + str(index), value))
     if len(dns_names) > 20:

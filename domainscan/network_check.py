@@ -26,6 +26,7 @@ def collect(ips, host=""):
         rows.append((ip + " routable", "Yes, public IP" if routable(ip) else "No (private or reserved)"))
     if host:
         rows.append(("ICMP ping", ping(host)))
+        rows.append(("TCP latency", summarize_latency(host)))
     shown = unique[:6]
     if len(unique) > 6:
         rows.append(("IP note", "Showing first 6 of " + str(len(unique))))
@@ -52,6 +53,34 @@ def ping(host):
     if match:
         return "Reply in " + match.group(1) + " ms"
     return "Reply received"
+
+
+def summarize_latency(host, timeout=5):
+    import time
+    best = None
+    for port in (80, 443):
+        start = time.monotonic()
+        sock = None
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+            elapsed = (time.monotonic() - start) * 1000
+        except Exception:
+            continue
+        finally:
+            try:
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+        if best is None or elapsed < best:
+            best = elapsed
+    if best is None:
+        return "No TCP answer on 80/443"
+    if best < 50:
+        return str(int(best)) + " ms (excellent)"
+    if best < 150:
+        return str(int(best)) + " ms (good)"
+    return str(int(best)) + " ms (slow)"
 
 
 def dual_stack(ips):

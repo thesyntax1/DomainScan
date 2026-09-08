@@ -18,10 +18,12 @@ def collect(html, page_url, headers=None, timeout=8):
     rows.extend(title_rows(soup))
     rows.extend(meta_rows(soup))
     rows.extend(canonical_rows(soup, page_url, timeout))
+    rows.extend(title_h1_rows(soup))
+    rows.extend(discovery_rows(soup))
     rows.extend(hreflang_rows(soup, timeout))
     rows.extend(social_tag_rows(soup, timeout))
     rows.extend(heading_rows(soup))
-    rows.extend(technical_rows(soup, page_url, headers or {}, html))
+    rows.extend(technical_rows(soup, page_url, headers or {}, html, timeout))
     return {"rows": rows}
 
 
@@ -105,6 +107,41 @@ def head_status(url, timeout):
         return 0
 
 
+def title_h1_rows(soup):
+    rows = []
+    title = page_title(soup).lower()
+    h1 = soup.find("h1")
+    if not title or not h1:
+        return rows
+    if title == h1.get_text(" ", strip=True).lower():
+        rows.append(("Title vs H1", "Identical (wastes an optimization slot)"))
+    return rows
+
+
+def discovery_rows(soup):
+    rows = []
+    amp = soup.find("link", attrs={"rel": "amphtml"})
+    if amp and amp.get("href"):
+        rows.append(("AMP version", short(amp["href"], 200)))
+    feeds = []
+    for tag in soup.find_all("link", type=True):
+        mime = str(tag.get("type", "")).lower()
+        if "rss" in mime or "atom" in mime:
+            feeds.append(tag.get("href", ""))
+    if feeds:
+        rows.append(("Feeds discovered", str(len(feeds))))
+        for index, href in enumerate(feeds[:3], 1):
+            rows.append(("Feed " + str(index), short(href, 200)))
+    prev_link = soup.find("link", attrs={"rel": "prev"})
+    next_link = soup.find("link", attrs={"rel": "next"})
+    if prev_link or next_link:
+        rows.append(("Pagination", "rel prev/next present"))
+    shortlink = soup.find("link", attrs={"rel": "shortlink"})
+    if shortlink and shortlink.get("href"):
+        rows.append(("Shortlink", short(shortlink["href"], 200)))
+    return rows
+
+
 def canonical_rows(soup, page_url, timeout):
     rows = []
     links = soup.find_all("link", attrs={"rel": "canonical"})
@@ -123,10 +160,33 @@ def canonical_rows(soup, page_url, timeout):
     status = head_status(absolute, timeout)
     if status == 200:
         rows.append(("Canonical reachable", "Yes (HTTP 200)"))
+        rows.extend(canonical_chain_rows(absolute, timeout))
     elif status:
         rows.append(("Canonical reachable", "No (HTTP " + str(status) + ")"))
     else:
         rows.append(("Canonical reachable", "Check failed"))
+    return rows
+
+
+def canonical_chain_rows(url, timeout):
+    import requests
+    rows = []
+    try:
+        response = requests.get(url, timeout=timeout, headers={"User-Agent": BROWSER_UA})
+        html = response.text or ""
+    except Exception:
+        return rows
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return rows
+    target = soup.find("link", attrs={"rel": "canonical"})
+    if not target or not target.get("href"):
+        return rows
+    second = urllib.parse.urljoin(url, target["href"]).rstrip("/")
+    if second != url.rstrip("/"):
+        rows.append(("Canonical chain", "Target points elsewhere: " + short(second, 180)))
     return rows
 
 
@@ -182,6 +242,15 @@ def social_tag_rows(soup, timeout):
         rows.append(("Twitter card", twitter))
     else:
         rows.append(("Twitter card", "Missing"))
+    locale = meta_content(soup, "og:locale")
+    if locale:
+        rows.append(("OG locale", locale))
+    published = meta_content(soup, "article:published_time")
+    if published:
+        rows.append(("Article published", published[:16]))
+    modified = meta_content(soup, "article:modified_time")
+    if modified:
+        rows.append(("Article modified", modified[:16]))
     return rows
 
 
@@ -214,7 +283,7 @@ def heading_rows(soup):
     return rows
 
 
-def technical_rows(soup, page_url, headers, html):
+def technical_rows(soup, page_url, headers, html, timeout=8):
     rows = []
     html_tag = soup.find("html")
     lang = ""
@@ -242,11 +311,61 @@ def technical_rows(soup, page_url, headers, html):
     base = urllib.parse.urlsplit(page_url)
     prefix = base.scheme + "://" + base.netloc
     rows.append(("Sitemap reference", sitemap_reference(prefix)))
+    rows.extend(robots_block_rows(prefix, timeout))
+    rows.extend(sitemap_count_rows(prefix, timeout))
     icons = soup.find_all("link", attrs={"rel": "apple-touch-icon"})
     if icons:
         rows.append(("Apple touch icon", "Declared"))
     else:
         rows.append(("Apple touch icon", "Not declared"))
+    return rows
+
+
+def robots_block_rows(prefix, timeout):
+    import requests
+    rows = []
+    try:
+        response = requests.get(prefix + "/robots.txt", timeout=timeout, headers={"User-Agent": BROWSER_UA})
+    except Exception:
+        return rows
+    if response.status_code != 200:
+        return rows
+    if blocks_all_crawlers(response.text or ""):
+        rows.append(("robots.txt block", "Disallow: / for all crawlers (site deindexed)"))
+    return rows
+
+
+def blocks_all_crawlers(text):
+    agents = set()
+    star_block = False
+    current_star = False
+    for line in (text or "").splitlines():
+        clean = line.split("#", 1)[0].strip()
+        if not clean or ":" not in clean:
+            continue
+        key, value = clean.split(":", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "user-agent":
+            agents.add(value)
+            current_star = value == "*"
+        elif key == "disallow" and current_star and value == "/":
+            star_block = True
+    return star_block
+
+
+def sitemap_count_rows(prefix, timeout):
+    import requests
+    rows = []
+    try:
+        response = requests.get(prefix + "/sitemap.xml", timeout=timeout, headers={"User-Agent": BROWSER_UA})
+    except Exception:
+        return rows
+    if response.status_code != 200:
+        return rows
+    count = len(re.findall(r"<loc>", response.text or "", re.IGNORECASE))
+    if count:
+        rows.append(("Sitemap URLs (live)", str(count)))
     return rows
 
 

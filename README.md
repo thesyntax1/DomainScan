@@ -10,15 +10,17 @@ DomainScan is a desktop tool that collects publicly available information about 
 - Subdomain discovery (certificate transparency, passive DNS, DNS brute-force, wildcard detection, wildcard-artifact filtering, depth stats, takeover review)
 - Subdomain web probing (HTTP status, server and title per subdomain)
 - WHOIS / RDAP (authoritative TLD RDAP via IANA bootstrap, port-43 fallback with raw record, EPP status meanings, IP/RIR WHOIS, NS resolution with lame-delegation notes, TLD manager, domain age, contacts)
-- Typosquat check (40 lookalike variants with DNS probing)
-- Certificate history (CT log search via crt.sh: issuers, expiries, wildcards)
-- Web archive (Wayback CDX: captures, timespan, content types, interesting paths)
+- Typosquat check (40 lookalike variants with DNS probing, IDN homoglyphs, live page titles)
+- Certificate history (CT log search via crt.sh and Cert Spotter: issuers, expiries, wildcards)
+- Web archive (Wayback CDX: captures, timespan, content types, archived subdomains, byte totals, interesting paths)
+- Threat intelligence (urlscan.io verdicts, ThreatFox and URLhaus malware lookups)
+- Common Crawl (third-party web archive index: captures, content types, subdomains)
 - IP and network (ping, reverse DNS, ASN, ISP, geolocation with map link, dual-stack and routable checks)
 - BGP routing (prefix with size, origin ASN, announced prefixes, peers, prefix use, PeeringDB/RDAP enrichment)
 - Reputation (IPv4 blocklists across 7 DNSBLs plus domain blocklists SURBL/DBL/SEM)
 - Website (redirects, headers, cookies with flag and prefix analysis, CSP/Permissions/Link/Server-Timing parsing, X-header inventory, security headers, compression ratio, TTFB, HTTP version, clock skew, cache validators)
 - Extra web checks (HTTP methods, TRACE, clickjacking, CORS with null-origin probe, WAF fingerprints, CDN detection, open redirect test, host injection test, Alt-Svc, HSTS preload, IPv6, 404 handling, sensitive paths, API discovery with GraphQL introspection, Swagger and wp-json parsing)
-- Exposure scan (50 sensitive paths with body-signature verification: git, env, backups, cloud keys, consoles, actuators)
+- Exposure scan (65 sensitive paths with body-signature verification: git, env, backups, cloud keys, consoles, actuators, container and API descriptors)
 - TLS certificate (issuer, validity, 398-day compliance, SANs, fingerprints, trust, ALPN/HTTP2, legacy and TLS 1.3 probes, openssl chain with key size/usage/SCT/Must-Staple parsing, OCSP stapling, session resumption, weak cipher probes)
 - Mail authentication (SPF with lookup count and issue detection, DMARC with external-report auth, DKIM selectors, BIMI logo fetch, MTA-STS verdict, TLS-RPT, MX health incl. CNAME/private-IP checks, ESMTP extensions, STARTTLS certificates, DANE)
 - Page content (title, meta tags, links, images, scripts with SRI audit, forms with CSRF/upload analysis, login forms, jQuery version, error disclosure, DOM stats, PWA markers, mixed content, external resource counts, JS paths, HTML comments, JSON-LD, SEO basics, contacts)
@@ -57,15 +59,18 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Type a domain or URL (for example `example.com`) and press Scan. The Tools menu offers a standalone WHOIS lookup for any domain or IP.
+Type a domain or URL (for example `example.com`) and press Scan. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens Scan History (load or compare earlier scans) and Watch Target (rescan periodically and report changes).
 
 ## Command line
 
 ```bash
 python main.py example.com --profile Standard --export report.html
+python main.py --history example.com
+python main.py --compare example.com
+python main.py --watch example.com --interval 300 --rounds 4
 ```
 
-Run `python main.py --help` for all options. Every scan is saved under `~/.domainscan/history/` and can be compared with earlier scans from the Compare button.
+Run `python main.py --help` for all options. Every scan is saved under `~/.domainscan/history/` (older runs are pruned to the latest 20) and can be compared with earlier scans from the Scan menu.
 
 ## Export
 

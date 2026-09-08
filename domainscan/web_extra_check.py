@@ -53,6 +53,7 @@ def method_checks(session, base_url, timeout):
             rows.append((method + " status", str(response.status_code)))
         except Exception as exc:
             rows.append((method + " status", "Request failed (" + exc.__class__.__name__ + ")"))
+    rows.extend(writable_probe(session, base_url, timeout))
     try:
         response = session.request("TRACE", base_url + "/", timeout=timeout)
         body = response.text or ""
@@ -62,6 +63,56 @@ def method_checks(session, base_url, timeout):
             rows.append(("TRACE method", "Disabled or blocked (HTTP " + str(response.status_code) + ")"))
     except Exception as exc:
         rows.append(("TRACE method", "Request failed (" + exc.__class__.__name__ + ")"))
+    return rows
+
+
+def writable_probe(session, base_url, timeout):
+    rows = []
+    import random
+    import string
+    token = "".join(random.choice(string.ascii_lowercase) for _ in range(12))
+    path = "/domainscan-probe-" + token + ".txt"
+    try:
+        put = session.request("PUT", base_url + path, data=b"probe", timeout=timeout)
+    except Exception:
+        rows.append(("PUT probe", "Request failed"))
+        return rows
+    if put.status_code in (200, 201, 204):
+        try:
+            check = session.get(base_url + path, timeout=timeout)
+            if check.status_code == 200 and "probe" in (check.text or ""):
+                rows.append(("PUT probe", "WRITABLE: uploaded file is retrievable (critical)"))
+            else:
+                rows.append(("PUT probe", "PUT returns " + str(put.status_code) + " but file not retrievable"))
+        except Exception:
+            rows.append(("PUT probe", "PUT returns " + str(put.status_code) + " (review)"))
+        try:
+            session.request("DELETE", base_url + path, timeout=timeout)
+        except Exception:
+            pass
+    else:
+        rows.append(("PUT probe", "Not writable (HTTP " + str(put.status_code) + ")"))
+    return rows
+
+
+def preflight_rows(session, base_url, timeout):
+    rows = []
+    try:
+        response = session.options(base_url + "/", timeout=timeout, headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "PUT"})
+    except Exception as exc:
+        rows.append(("CORS preflight", "Request failed (" + exc.__class__.__name__ + ")"))
+        return rows
+    methods = response.headers.get("Access-Control-Allow-Methods", "")
+    req_headers = response.headers.get("Access-Control-Allow-Headers", "")
+    if methods or req_headers:
+        detail = "HTTP " + str(response.status_code)
+        if methods:
+            detail = detail + ", methods: " + short(methods, 120)
+        if req_headers:
+            detail = detail + ", headers: " + short(req_headers, 120)
+        rows.append(("CORS preflight", detail))
+    else:
+        rows.append(("CORS preflight", "No preflight headers (HTTP " + str(response.status_code) + ")"))
     return rows
 
 
@@ -129,6 +180,7 @@ def cors_check(session, base_url, timeout):
             rows.append(("CORS null origin", "Not trusted"))
     except Exception:
         rows.append(("CORS null origin", "Probe failed"))
+    rows.extend(preflight_rows(session, base_url, timeout))
     return rows
 
 

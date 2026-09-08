@@ -54,6 +54,21 @@ PROBES = [
     ("/credentials.xml", "credentials", "high"),
     ("/id_rsa", "PRIVATE KEY", "critical"),
     ("/server.key", "PRIVATE KEY", "critical"),
+    ("/.env", "APP_", "critical"),
+    ("/.env.development", "APP_", "high"),
+    ("/Dockerfile", "FROM ", "medium"),
+    ("/docker-compose.yml", "services:", "medium"),
+    ("/phpinfo.php", "phpinfo()", "high"),
+    ("/info.php", "phpinfo()", "high"),
+    ("/swagger.json", "openapi", "medium"),
+    ("/openapi.json", "openapi", "medium"),
+    ("/api-docs", "swagger", "medium"),
+    ("/wp-json/wp/v2/users", "\"slug\"", "medium"),
+    ("/.DS_Store", None, "low"),
+    ("/metrics", "# HELP", "medium"),
+    ("/healthz", None, "low"),
+    ("/v2/_catalog", "repositories", "medium"),
+    ("/graphql", "query", "medium"),
 ]
 
 

@@ -2,7 +2,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from domainscan import __version__
-from domainscan import a11y_check, bgp_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, helpers, history_check, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, reputation_check, seo_check, subdomain_check, typo_check, wayback_check, web_extra_check, whois_check
+from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, helpers, history_check, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, reputation_check, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
 
 
 def safe_run(func):
@@ -52,6 +52,8 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
         ("Archive", "Querying web archive", lambda: wayback_check.collect(host, timeout) if include_recon else {"rows": [("Archive", "Skipped (Quick profile)")]}),
         ("Certificates", "Querying certificate logs", lambda: crtsh_check.collect(apex, timeout) if include_recon else {"rows": [("Certificates", "Skipped (Quick profile)")]}),
         ("Typosquat", "Checking lookalike domains", lambda: typo_check.collect(apex, include_recon)),
+        ("Threat Intel", "Querying threat feeds", lambda: threat_check.collect(host, apex, timeout) if include_recon else {"rows": [("Threat Intel", "Skipped (Quick profile)")]}),
+        ("Common Crawl", "Querying Common Crawl", lambda: commoncrawl_check.collect(host, timeout) if include_recon else {"rows": [("Common Crawl", "Skipped (Quick profile)")]}),
         ("Website", "Fetching website", lambda: http_check.collect_http(fetch_url, timeout)),
         ("TLS", "Checking TLS certificate", lambda: http_check.collect_tls(host, 443)),
         ("Site Files", "Fetching robots and sitemaps", lambda: files_check.collect(info["base_url"], timeout)),
@@ -87,6 +89,8 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
     sections["Archive"] = results["Archive"]["rows"]
     sections["Certificates"] = results["Certificates"]["rows"]
     sections["Typosquat"] = results["Typosquat"]["rows"]
+    sections["Threat Intel"] = results["Threat Intel"]["rows"]
+    sections["Common Crawl"] = results["Common Crawl"]["rows"]
 
     emit(76, "Analyzing page content")
     try:
@@ -102,7 +106,7 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
     final_url = web.get("final_url", fetch_url)
     post_jobs = [
         ("Web Extras", lambda: web_extra_check.collect(info["base_url"], web.get("headers", {}), timeout)),
-        ("Crawl", lambda: crawl_check.collect(final_url, timeout, crawl_pages) if html else {"rows": [("Crawl", "Skipped (no page content)")]}),
+        ("Crawl", lambda: crawl_check.collect(final_url, timeout, crawl_pages, results["Site Files"].get("sitemap_urls", [])) if html else {"rows": [("Crawl", "Skipped (no page content)")]}),
         ("JS Analysis", lambda: js_check.collect(final_url, html, timeout, js_files) if html else {"rows": [("JS analysis", "Skipped (no page content)")]}),
         ("Subdomain Web", lambda: subdomain_check.probe_web(confirmed, subdomain_web, timeout) if confirmed and subdomain_web > 0 else {"rows": [("Subdomain web", "Skipped")]}),
         ("Exposures", lambda: exposure_check.collect(info["base_url"], timeout, include_recon)),
@@ -129,7 +133,7 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
     emit(96, "Finishing")
     duration = time.perf_counter() - started
     ordered = {}
-    for section in ("Target", "DNS", "Subdomains", "Subdomain Web", "Typosquat", "WHOIS / RDAP", "Network", "BGP", "Reputation", "Website", "Web Extras", "Exposures", "TLS", "Certificates", "Mail", "Content", "SEO", "Accessibility", "Performance", "Privacy", "Crawl", "JS Analysis", "Technologies", "Site Files", "Web History", "Archive", "Ports", "Cross-Checks"):
+    for section in ("Target", "DNS", "Subdomains", "Subdomain Web", "Typosquat", "WHOIS / RDAP", "Network", "BGP", "Reputation", "Website", "Web Extras", "Exposures", "TLS", "Certificates", "Mail", "Content", "SEO", "Accessibility", "Performance", "Privacy", "Crawl", "JS Analysis", "Technologies", "Site Files", "Web History", "Archive", "Common Crawl", "Threat Intel", "Ports", "Cross-Checks"):
         if section in sections:
             ordered[section] = sections[section]
     ordered["Summary"] = build_summary(info, ordered, duration)

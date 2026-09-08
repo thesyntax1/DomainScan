@@ -17,6 +17,9 @@ def collect(html):
     rows.extend(form_rows(soup))
     rows.extend(button_rows(soup))
     rows.extend(structure_rows(soup))
+    rows.extend(hidden_focus_rows(soup))
+    rows.extend(motion_rows(soup))
+    rows.extend(group_rows(soup))
     rows.append(("Accessibility score", score(rows)))
     return {"rows": rows}
 
@@ -131,6 +134,41 @@ def structure_rows(soup):
     return rows
 
 
+def hidden_focus_rows(soup):
+    rows = []
+    bad = 0
+    for tag in soup.find_all(attrs={"aria-hidden": "true"}):
+        if tag.find(["a", "button", "input", "select", "textarea"]):
+            bad += 1
+    rows.append(("Hidden focusable elements", str(bad) + " (aria-hidden with links or controls)"))
+    return rows
+
+
+def motion_rows(soup):
+    rows = []
+    marquees = len(soup.find_all("marquee")) + len(soup.find_all("blink"))
+    rows.append(("Auto-moving content", str(marquees) + " marquee/blink elements"))
+    auto = [tag for tag in soup.find_all("video") if tag.has_attr("autoplay")]
+    rows.append(("Autoplay videos", str(len(auto))))
+    keys = soup.find_all(attrs={"accesskey": True})
+    rows.append(("Accesskeys", str(len(keys)) + " (often conflict with assistive tech)"))
+    return rows
+
+
+def group_rows(soup):
+    rows = []
+    radios = soup.find_all("input", {"type": "radio"})
+    checks = soup.find_all("input", {"type": "checkbox"})
+    grouped = len(radios) + len(checks)
+    if not grouped:
+        return rows
+    fieldsets = len(soup.find_all("fieldset"))
+    rows.append(("Fieldsets", str(fieldsets) + " for " + str(grouped) + " radio/checkbox inputs"))
+    if fieldsets == 0:
+        rows.append(("Group verdict", "No fieldset/legend grouping"))
+    return rows
+
+
 def score(rows):
     problems = 0
     for key, value in rows:
@@ -149,6 +187,10 @@ def score(rows):
         if key == "Skip link" and value == "Missing":
             problems += 1
         if key == "Positive tabindex" and not value.startswith("0"):
+            problems += 1
+        if key == "Hidden focusable elements" and not value.startswith("0"):
+            problems += 2
+        if key == "Autoplay videos" and value != "0":
             problems += 1
     problems = min(problems, 10)
     return str((10 - problems) * 10) + "/100 (" + str(problems) + " issue points)"

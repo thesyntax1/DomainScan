@@ -24,6 +24,11 @@ def describe_ip(ip):
         rows.append(("BGP " + ip, "Lookup failed"))
         return rows
     asn = parse_ip_info(info, ip, rows)
+    prefix = info.get("prefix", "")
+    if prefix:
+        rows.extend(prefix_rows(prefix, ip))
+    if asn and prefix:
+        rows.extend(rpki_rows(asn, prefix, ip))
     if asn:
         detail = fetch_asn_info(asn)
         if detail:
@@ -87,6 +92,42 @@ def asn_rdap_rows(asn):
     for entity in (payload.get("entities", []) or [])[:2]:
         for key, value in whois_check.parse_entity(entity, "")[:4]:
             rows.append(("AS" + str(asn) + " " + key.lower(), value))
+    return rows
+
+
+def prefix_rows(prefix, ip):
+    import requests
+    rows = []
+    try:
+        response = requests.get("https://api.bgpview.io/prefix/" + prefix, timeout=10, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return rows
+    if data.get("status") != "ok":
+        return rows
+    info = data.get("data", {}) or {}
+    for key, label in (("rir_allocation", "RIR allocation"), ("name", "Prefix name"),
+                       ("description_short", "Prefix use"), ("country_code", "Prefix country")):
+        if info.get(key):
+            rows.append((ip + " " + label, short(str(info[key]), 140)))
+    return rows
+
+
+def rpki_rows(asn, prefix, ip):
+    import requests
+    rows = []
+    try:
+        response = requests.get("https://rpki.cloudflare.com/api/v1/validity/" + str(asn) + "/" + prefix, timeout=10, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return rows
+    validity = (data.get("validity", {}) or {}).get("state", "")
+    if validity == "valid":
+        rows.append((ip + " RPKI", "Valid (route is authorized)"))
+    elif validity == "invalid":
+        rows.append((ip + " RPKI", "INVALID (possible hijack or misconfiguration)"))
+    elif validity:
+        rows.append((ip + " RPKI", validity))
     return rows
 
 

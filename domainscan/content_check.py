@@ -192,6 +192,13 @@ def analyze_soup(soup, page_url, html):
     rows.extend(dom_rows(soup))
     rows.extend(pwa_rows(soup, html))
     rows.extend(resource_host_rows(soup, page_url))
+    rows.extend(base_tag_rows(soup, page_url))
+    rows.extend(tabnabbing_rows(soup))
+    rows.extend(iframe_sandbox_rows(soup))
+    rows.extend(refresh_rows(soup))
+    rows.extend(duplicate_id_rows(soup))
+    rows.extend(deprecated_tag_rows(soup))
+    rows.extend(autocomplete_rows(soup))
     inline_js = "\n".join(tag.string or "" for tag in soup.find_all("script") if not tag.get("src"))
     paths = extract_js_paths(inline_js)
     rows.append(("JS paths (inline)", str(len(paths))))
@@ -213,6 +220,109 @@ def analyze_soup(soup, page_url, html):
     for index, (word, count) in enumerate(top_words(text), 1):
         rows.append(("Top word " + str(index), word + " (" + str(count) + " times)"))
     rows.extend(find_contacts(html, hrefs))
+    return rows
+
+
+def base_tag_rows(soup, page_url):
+    rows = []
+    tags = soup.find_all("base", href=True)
+    if not tags:
+        return rows
+    rows.append(("Base tags", str(len(tags))))
+    page_host = (urllib.parse.urlsplit(page_url).hostname or "").lower()
+    for tag in tags[:3]:
+        href = tag.get("href", "")
+        if href.lower().startswith("http"):
+            host = (urllib.parse.urlsplit(href).hostname or "").lower()
+            if host and host != page_host:
+                rows.append(("Base tag hijack", "External base " + short(href, 140) + " (all relative URLs resolve there)"))
+            else:
+                rows.append(("Base tag", short(href, 140)))
+        else:
+            rows.append(("Base tag", short(href, 140)))
+    return rows
+
+
+def tabnabbing_rows(soup):
+    rows = []
+    targets = [tag for tag in soup.find_all("a", href=True) if str(tag.get("target", "")).lower() == "_blank"]
+    if not targets:
+        return rows
+    rows.append(("New-tab links", str(len(targets))))
+    exposed = 0
+    for tag in targets:
+        rel = str(tag.get("rel", "")).lower()
+        if "noopener" not in rel and "noreferrer" not in rel:
+            exposed += 1
+    if exposed:
+        rows.append(("Tabnabbing risk", str(exposed) + " target=_blank links lack rel=noopener"))
+    else:
+        rows.append(("Tabnabbing risk", "All new-tab links use rel=noopener"))
+    return rows
+
+
+def iframe_sandbox_rows(soup):
+    rows = []
+    frames = soup.find_all("iframe")
+    if not frames:
+        return rows
+    unsandboxed = [frame for frame in frames if not frame.has_attr("sandbox")]
+    rows.append(("Unsandboxed iframes", str(len(unsandboxed)) + " of " + str(len(frames))))
+    for frame in unsandboxed[:5]:
+        rows.append(("Unsandboxed iframe", short(frame.get("src", "") or "(no src)", 160)))
+    return rows
+
+
+def refresh_rows(soup):
+    rows = []
+    for tag in soup.find_all("meta"):
+        if str(tag.get("http-equiv", "")).lower() != "refresh":
+            continue
+        content = tag.get("content", "")
+        rows.append(("Meta refresh", short(content, 160)))
+        low = content.lower()
+        if "url=http" in low.replace(" ", ""):
+            rows.append(("Meta refresh target", "Redirects to absolute URL (review)"))
+    return rows
+
+
+def duplicate_id_rows(soup):
+    rows = []
+    seen = {}
+    dupes = set()
+    for tag in soup.find_all(id=True):
+        value = tag.get("id", "")
+        if value in seen:
+            dupes.add(value)
+        else:
+            seen[value] = True
+    if dupes:
+        rows.append(("Duplicate IDs", str(len(dupes)) + ": " + short(", ".join(sorted(dupes)[:8]), 180)))
+    return rows
+
+
+def deprecated_tag_rows(soup):
+    rows = []
+    hits = {}
+    for name in ("font", "center", "marquee", "blink", "applet", "frame", "frameset", "big", "strike"):
+        count = len(soup.find_all(name))
+        if count:
+            hits[name] = count
+    if hits:
+        rows.append(("Deprecated tags", ", ".join(name + "x" + str(hits[name]) for name in sorted(hits))))
+    return rows
+
+
+def autocomplete_rows(soup):
+    rows = []
+    passwords = soup.find_all("input", {"type": "password"})
+    if not passwords:
+        return rows
+    off = sum(1 for tag in passwords if str(tag.get("autocomplete", "")).lower() in ("off", "new-password"))
+    rows.append(("Password autocomplete", str(off) + " of " + str(len(passwords)) + " disable storage"))
+    ccs = [tag for tag in soup.find_all("input") if "card" in str(tag.get("name", "")).lower() or "card" in str(tag.get("id", "")).lower() or "cc-" in str(tag.get("autocomplete", "")).lower()]
+    if ccs:
+        rows.append(("Card fields", str(len(ccs)) + " possible payment inputs"))
     return rows
 
 
@@ -253,6 +363,9 @@ def jquery_rows(soup, html):
         rows.append(("jQuery verdict", "Version 1.x/2.x is end-of-life (known XSS issues)"))
     elif version.startswith("3."):
         rows.append(("jQuery verdict", "Version 3.x (maintained branch)"))
+    vuln = vuln_lookup("jQuery", version)
+    if vuln:
+        rows.append(("jQuery vulnerability", vuln))
     return rows
 
 
@@ -390,10 +503,12 @@ def jsonld_rows(soup):
     blocks = soup.find_all("script", {"type": "application/ld+json"})
     rows.append(("JSON-LD blocks", str(len(blocks))))
     types = []
+    invalid = 0
     for block in blocks:
         try:
             data = json.loads(block.string or "")
         except Exception:
+            invalid += 1
             continue
         items = []
         if isinstance(data, list):
@@ -405,6 +520,8 @@ def jsonld_rows(soup):
                 types.append(str(item["@type"]))
     if types:
         rows.append(("Schema types", ", ".join(types[:10])))
+    if invalid:
+        rows.append(("JSON-LD invalid", str(invalid) + " blocks fail to parse"))
     return rows
 
 
@@ -585,6 +702,62 @@ def top_words(text, limit=8):
     words = re.findall(r"[a-zA-Z]{5,}", text.lower())
     counts = Counter(word for word in words if word not in STOPWORDS)
     return counts.most_common(limit)
+
+
+VULN_DB = [
+    ("jQuery", "3.5.0", "below 3.5.0 is affected by published XSS CVEs"),
+    ("Lodash", "4.17.21", "below 4.17.21 is affected by prototype pollution CVE-2020-8203"),
+    ("Bootstrap", "4.3.1", "below 4.3.1 is affected by published XSS CVEs"),
+    ("Moment", "2.29.4", "below 2.29.4 is affected by ReDoS CVE-2022-24785"),
+    ("Handlebars", "4.7.7", "below 4.7.7 is affected by template code execution CVEs"),
+]
+
+EOL_LIBS = {
+    "jQuery 1": "jQuery 1.x is end-of-life",
+    "jQuery 2": "jQuery 2.x is end-of-life",
+    "Bootstrap 3": "Bootstrap 3.x is end-of-life",
+    "Bootstrap 2": "Bootstrap 2.x is end-of-life",
+    "AngularJS 1": "AngularJS 1.x is end-of-life since January 2022",
+    "Vue 1": "Vue 1.x is end-of-life",
+    "CKEditor 4": "CKEditor 4.x reached end-of-life in June 2023",
+    "Prototype": "Prototype.js is end-of-life",
+    "MooTools": "MooTools is end-of-life",
+}
+
+
+def version_tuple(version):
+    parts = []
+    for bit in str(version or "").split("."):
+        digits = "".join(char for char in bit if char.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def version_below(found, minimum):
+    have = version_tuple(found)
+    want = version_tuple(minimum)
+    if not have or not want:
+        return False
+    length = max(len(have), len(want))
+    have = have + (0,) * (length - len(have))
+    want = want + (0,) * (length - len(want))
+    return have < want
+
+
+def vuln_lookup(name, version):
+    low = (name or "").lower()
+    for lib, minimum, label in VULN_DB:
+        if lib.lower() == low and version_below(version, minimum):
+            return lib + " " + str(version) + " " + label
+    major = str(version or "").split(".")[0]
+    key = (name or "") + " " + major
+    if key in EOL_LIBS:
+        return EOL_LIBS[key] + " (" + str(version) + ")"
+    if low in ("prototype", "mootools"):
+        return EOL_LIBS.get(name, "")
+    return ""
 
 
 def extract_version(text, pattern):

@@ -51,6 +51,17 @@ def load_run(path):
     return {"meta": data.get("meta", {}), "target": data.get("target", {}), "sections": sections}
 
 
+def prune_old(host, keep=20, directory=None):
+    removed = 0
+    for path in list_runs(host, directory)[keep:]:
+        try:
+            os.remove(path)
+            removed += 1
+        except Exception:
+            continue
+    return removed
+
+
 def previous_run(host, current_stamp, directory=None):
     for path in list_runs(host, directory)[:5]:
         try:

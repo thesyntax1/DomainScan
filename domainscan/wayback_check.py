@@ -17,7 +17,41 @@ def collect(host, timeout=10):
         rows.append(("Archived captures", "None found"))
         return {"rows": rows}
     rows.extend(summarize(captures))
+    rows.extend(subdomain_rows(host, timeout))
     return {"rows": rows}
+
+
+def subdomain_rows(host, timeout):
+    import requests
+    rows = []
+    params = {
+        "url": host,
+        "matchType": "domain",
+        "output": "json",
+        "fl": "original",
+        "collapse": "urlkey",
+        "limit": 2000,
+    }
+    try:
+        response = requests.get("https://web.archive.org/cdx/search/cdx", params=params, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        return rows
+    if not data or len(data) < 2:
+        return rows
+    subs = set()
+    for row in data[1:]:
+        if not row or not row[0]:
+            continue
+        name = (urllib.parse.urlsplit(row[0]).hostname or "").lower()
+        if name and name != host.lower() and name.endswith("." + host.lower()):
+            subs.add(name)
+    if subs:
+        rows.append(("Archived subdomains", str(len(subs))))
+        for index, name in enumerate(sorted(subs)[:8], 1):
+            rows.append(("Archived subdomain " + str(index), name))
+    return rows
 
 
 def fetch_cdx(host, timeout):
@@ -25,7 +59,7 @@ def fetch_cdx(host, timeout):
     params = {
         "url": host + "/*",
         "output": "json",
-        "fl": "timestamp,original,statuscode,mimetype,digest",
+        "fl": "timestamp,original,statuscode,mimetype,digest,length",
         "filter": "statuscode:200",
         "collapse": "urlkey",
         "limit": 500,
@@ -43,6 +77,17 @@ def summarize(captures):
     rows = []
     stamps = sorted(row[0] for row in captures if row and row[0])
     rows.append(("Archived URLs", str(len(captures)) + " unique URLs"))
+    total = 0
+    counted = 0
+    for row in captures:
+        if len(row) > 5 and row[5] and row[5] != "-":
+            try:
+                total += int(row[5])
+                counted += 1
+            except Exception:
+                continue
+    if counted:
+        rows.append(("Archived bytes", format_bytes(total) + " across " + str(counted) + " captures"))
     if stamps:
         rows.append(("First capture", format_stamp(stamps[0])))
         rows.append(("Latest capture", format_stamp(stamps[-1])))
@@ -67,6 +112,17 @@ def summarize(captures):
     for index, target in enumerate(samples, 1):
         rows.append(("Sample archived URL " + str(index), short(target, 200)))
     return rows
+
+
+def format_bytes(total):
+    value = float(total)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            if unit == "B":
+                return str(int(value)) + " B"
+            return str(round(value, 1)) + " " + unit
+        value = value / 1024
+    return str(total) + " B"
 
 
 def format_stamp(stamp):

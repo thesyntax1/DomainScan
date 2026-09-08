@@ -153,6 +153,28 @@ def fetch_rdap_proxy(domain):
     return response.json()
 
 
+def lock_rows(statuses):
+    rows = []
+    clean = set()
+    for status in statuses or []:
+        token = str(status or "").split()[0].strip().lower()
+        clean.add(token)
+    transfer = "clienttransferprohibited" in clean or "servertransferprohibited" in clean
+    delete = "clientdeleteprohibited" in clean or "serverdeleteprohibited" in clean
+    update = "clientupdateprohibited" in clean or "serverupdateprohibited" in clean
+    if transfer:
+        rows.append(("Transfer lock", "Set (domain cannot be moved without unlock)"))
+    else:
+        rows.append(("Transfer lock", "Not set (hijack risk if account is breached)"))
+    if delete and update:
+        rows.append(("Update/delete lock", "Both set"))
+    elif delete or update:
+        rows.append(("Update/delete lock", "Partial (delete: " + ("yes" if delete else "no") + ", update: " + ("yes" if update else "no") + ")"))
+    else:
+        rows.append(("Update/delete lock", "Neither set"))
+    return rows
+
+
 def status_meaning(code):
     clean = (code or "").split()[0].lower() if (code or "").split() else ""
     return STATUS_MEANINGS.get(clean, "")
@@ -243,6 +265,7 @@ def parse_rdap(data):
         rows.append(("Status count", str(len(statuses))))
         for index, status in enumerate(statuses, 1):
             rows.append(("Status " + str(index), with_meaning(status)))
+        rows.extend(lock_rows(statuses))
     else:
         rows.append(("Status", "None listed"))
     created = ""

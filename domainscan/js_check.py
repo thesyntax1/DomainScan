@@ -67,6 +67,10 @@ def collect(page_url, html, timeout=8, max_files=6):
     rows.extend(framework_rows(texts))
     rows.extend(library_version_rows(texts))
     rows.extend(danger_rows(texts))
+    rows.extend(postmessage_rows(texts))
+    rows.extend(storage_rows(texts))
+    rows.extend(debug_rows(texts))
+    rows.extend(endpoint_key_rows(endpoints))
     rows.extend(sourcemap_rows(session, texts, timeout))
     return {"rows": rows}
 
@@ -109,6 +113,11 @@ LIB_VERSIONS = [
     ("React", r"react[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
     ("Vue", r"vue[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
     ("Angular", r"@angular/core[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("AngularJS", r"angular\.js[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("Handlebars", r"handlebars[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("CKEditor", r"ckeditor[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("Prototype", r"prototype[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("MooTools", r"mootools[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
     ("Lodash", r"lodash[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
     ("Moment", r"moment[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
     ("D3", r"d3[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
@@ -131,6 +140,79 @@ def library_version_rows(texts):
     for name, version in hits:
         if name == "jQuery" and version.split(".")[0] in ("1", "2"):
             rows.append(("jQuery in JS", "End-of-life " + version + " (known XSS issues)"))
+    from domainscan.content_check import vuln_lookup
+    for name, version in hits:
+        label = vuln_lookup(name, version)
+        if label:
+            rows.append(("JS library risk: " + name, label))
+    return rows
+
+
+def postmessage_rows(texts):
+    rows = []
+    blob = " ".join(body or "" for _, body in texts)
+    listeners = len(re.findall(r"addEventListener\s*\(\s*[\"']message[\"']", blob))
+    posts = blob.count("postMessage")
+    if not listeners and not posts:
+        rows.append(("postMessage use", "None found"))
+        return rows
+    rows.append(("postMessage use", str(listeners) + " listeners, " + str(posts) + " posts"))
+    unchecked = 0
+    for match in re.finditer(r"addEventListener\s*\(\s*[\"']message[\"']", blob):
+        window = blob[match.start():match.start() + 800]
+        if ".origin" not in window and "origin ===" not in window:
+            unchecked += 1
+    if unchecked:
+        rows.append(("postMessage origin check", str(unchecked) + " listeners without origin validation"))
+    else:
+        rows.append(("postMessage origin check", "Listeners validate origin"))
+    return rows
+
+
+def storage_rows(texts):
+    rows = []
+    blob = " ".join(body or "" for _, body in texts)
+    hits = []
+    for match in re.finditer(r"(localStorage|sessionStorage)\s*\.\s*setItem\s*\(\s*[\"']([^\"']+)[\"']", blob):
+        key = match.group(2).lower()
+        if any(word in key for word in ("pass", "token", "secret", "key", "auth", "credential", "ssn")):
+            hits.append(match.group(2))
+    if hits:
+        rows.append(("Secrets in web storage", str(len(hits)) + " suspicious keys"))
+        for key in hits[:5]:
+            rows.append(("Storage key", short(key, 100) + " (readable by any page script)"))
+    else:
+        rows.append(("Secrets in web storage", "None spotted"))
+    return rows
+
+
+def debug_rows(texts):
+    rows = []
+    blob = " ".join(body or "" for _, body in texts)
+    logs = blob.count("console.log") + blob.count("console.debug") + blob.count("console.info")
+    debuggers = len(re.findall(r"\bdebugger\b", blob))
+    todos = blob.count("TODO") + blob.count("FIXME")
+    rows.append(("Debug leftovers", str(logs) + " console calls, " + str(debuggers) + " debugger statements"))
+    if todos:
+        rows.append(("TODO/FIXME in JS", str(todos)))
+    if "sourceMappingURL=data:" in blob.replace(" ", ""):
+        rows.append(("Inline source map", "Embedded (exposes original sources)"))
+    return rows
+
+
+def endpoint_key_rows(endpoints):
+    rows = []
+    hits = []
+    for path in endpoints or []:
+        low = path.lower()
+        if any(token in low for token in ("apikey=", "api_key=", "api-key=", "token=", "secret=", "password=", "passwd=", "access_token=", "client_secret=")):
+            hits.append(path)
+    if hits:
+        rows.append(("Keys in URLs", str(len(hits)) + " endpoints carry credentials"))
+        for path in hits[:5]:
+            rows.append(("Keyed endpoint", short(path, 160)))
+    else:
+        rows.append(("Keys in URLs", "None spotted"))
     return rows
 
 

@@ -86,11 +86,26 @@ def collect(apex, enabled=True):
         rows.append(("HackerTarget", "Lookup failed"))
     else:
         rows.append(("HackerTarget names", str(len(ht_names))))
+    tm_names = fetch_threatminer(apex)
+    if tm_names is None:
+        rows.append(("ThreatMiner", "Lookup failed"))
+    else:
+        rows.append(("ThreatMiner names", str(len(tm_names))))
+    us_names = fetch_urlscan_names(apex)
+    if us_names is None:
+        rows.append(("urlscan names", "Lookup failed"))
+    else:
+        rows.append(("urlscan names", str(len(us_names))))
+    cs_names = fetch_certspotter(apex)
+    if cs_names is None:
+        rows.append(("Cert Spotter", "Lookup failed"))
+    else:
+        rows.append(("Cert Spotter names", str(len(cs_names))))
     brute = brute_force(resolver, apex, wildcard_ips)
     rows.append(("Brute-force names tried", str(len(WORDLIST))))
     rows.append(("Brute-force hits", str(len(brute))))
     combined = set(brute)
-    for names in (crt_names, sonar_names or set(), ht_names or set()):
+    for names in (crt_names, sonar_names or set(), ht_names or set(), tm_names or set(), us_names or set(), cs_names or set()):
         for name in names:
             if name == apex or name.endswith("." + apex):
                 combined.add(name)
@@ -110,8 +125,45 @@ def collect(apex, enabled=True):
     unresolved = len(combined) - len(confirmed)
     if unresolved > 0:
         rows.append(("Unresolved names", str(unresolved) + " (seen in records but no A answer)"))
-    rows.extend(check_takeover(resolver, sorted(confirmed)[:40]))
+    rows.extend(check_takeover(resolver, sorted(confirmed)[:40], True))
     return {"rows": rows, "confirmed": confirmed}
+
+
+TAKEOVER_BODIES = [
+    ("GitHub Pages", "There isn't a GitHub Pages site here"),
+    ("Heroku", "No such app"),
+    ("Heroku", "herokuapp.com/login"),
+    ("AWS S3", "NoSuchBucket"),
+    ("AWS S3", "The specified bucket does not exist"),
+    ("CloudFront", "Bad request"),
+    ("Azure", "404 Web Site not found"),
+    ("Tumblr", "There's nothing here"),
+    ("Tumblr", "Whatever you were looking for doesn't currently exist"),
+    ("WordPress.com", "Do you want to register"),
+    ("Shopify", "Sorry, this shop is currently unavailable"),
+    ("Shopify", "Only one step left!"),
+    ("Fastly", "Fastly error: unknown domain"),
+    ("Zendesk", "Help Center Closed"),
+    ("Zendesk", "Oops, this help center no longer exists"),
+    ("Ghost", "The thing you were looking for is no longer here"),
+    ("Pantheon", "The gods are wise, but do not know of the site"),
+    ("Bitbucket", "Repository not found"),
+    ("Surge.sh", "project not found"),
+    ("Vercel", "The deployment could not be found"),
+    ("Netlify", "Not Found - Request ID:"),
+    ("ReadMe", "Project doesnt exist"),
+    ("Helpjuice", "We could not find what you're looking for"),
+    ("Statuspage", "You are being redirected"),
+    ("Unbounce", "The requested URL was not found on this server"),
+    ("Webflow", "The page you are looking for doesn't exist"),
+    ("Squarespace", "No Such Account"),
+    ("Weebly", "this site is under construction"),
+    ("BigCartel", "Oops! We couldn&#8217;t find that page"),
+    ("Cargo", "404 Not Found"),
+    ("Feedpress", "The feed has not been found"),
+    ("Gemfury", "404: This page could not be found"),
+    ("Mashery", "Unrecognized domain"),
+]
 
 
 def detect_wildcard(resolver, apex):
@@ -206,7 +258,7 @@ def is_takeover_candidate(target):
     return False
 
 
-def check_takeover(resolver, names):
+def check_takeover(resolver, names, verify_http=False):
     rows = []
     if not names:
         rows.append(("Takeover review", "No subdomains to review"))
@@ -216,20 +268,20 @@ def check_takeover(resolver, names):
         try:
             cname_result = dns_check.query(resolver, name, "CNAME")
         except Exception:
-            return ""
+            return None
         if not cname_result["records"]:
-            return ""
+            return None
         target = cname_result["records"][0].rstrip(".").lower()
         if not is_takeover_candidate(target):
-            return ""
+            return None
         try:
             target_result = dns_check.query(resolver, target, "A")
             records = target_result["records"]
         except Exception:
             records = []
         if not records:
-            return name + " CNAME " + target + " (target has no A record, verify manually)"
-        return ""
+            return (name, target)
+        return None
 
     flagged = []
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -239,11 +291,48 @@ def check_takeover(resolver, names):
     if not flagged:
         rows.append(("Takeover review", "No dangling CNAMEs spotted on checked subdomains"))
         return rows
-    for index, item in enumerate(flagged[:10], 1):
-        rows.append(("Review " + str(index), short(item, 220)))
+    confirmed = []
+    if verify_http:
+        confirmed = takeover_http_verify([name for name, _ in flagged])
+    for index, (name, target) in enumerate(flagged[:10], 1):
+        service = confirmed.get(name, "")
+        if service:
+            rows.append(("Takeover " + str(index), name + " CNAME " + target + " LIKELY TAKEABLE (" + service + " error page)"))
+        else:
+            rows.append(("Takeover " + str(index), name + " CNAME " + target + " (dangling, verify manually)"))
     if len(flagged) > 10:
         rows.append(("Review note", "Showing first 10 of " + str(len(flagged))))
     return rows
+
+
+def match_takeover_body(body):
+    low = (body or "")[:6000]
+    for service, marker in TAKEOVER_BODIES:
+        if marker in low:
+            return service
+    return ""
+
+
+def takeover_http_verify(names):
+    import requests
+    confirmed = {}
+
+    def check(name):
+        for scheme in ("http://", "https://"):
+            try:
+                response = requests.get(scheme + name + "/", timeout=5, headers={"User-Agent": BROWSER_UA})
+            except Exception:
+                continue
+            service = match_takeover_body(response.text or "")
+            if service:
+                return (name, service)
+        return None
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for item in pool.map(check, names[:10]):
+            if item:
+                confirmed[item[0]] = item[1]
+    return confirmed
 
 
 def fetch_crt(apex):
@@ -307,6 +396,66 @@ def fetch_hackertarget(apex):
     except Exception:
         return None
     return parse_hostsearch(text)
+
+
+def fetch_threatminer(apex):
+    import requests
+    try:
+        url = "https://api.threatminer.org/v2/domain.php"
+        response = requests.get(url, params={"q": apex, "rt": "5"}, timeout=10, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return None
+    if str(data.get("status_code", "")) != "200":
+        return set()
+    names = set()
+    for item in data.get("results", []) or []:
+        clean = str(item).strip().lower().rstrip(".")
+        if clean and " " not in clean:
+            names.add(clean)
+    return names
+
+
+def fetch_urlscan_names(apex):
+    import requests
+    import urllib.parse
+    try:
+        url = "https://urlscan.io/api/v1/search/"
+        response = requests.get(url, params={"q": "domain:" + apex, "size": 100}, timeout=12, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return None
+    names = set()
+    for item in data.get("results", []) or []:
+        for key in ("url", "domain"):
+            value = str(((item.get("page", {}) or {}).get(key, "")) or "")
+            if not value:
+                continue
+            if "://" in value:
+                host = (urllib.parse.urlsplit(value).hostname or "").lower()
+            else:
+                host = value.lower()
+            if host and (host == apex or host.endswith("." + apex)):
+                names.add(host)
+    return names
+
+
+def fetch_certspotter(apex):
+    import requests
+    try:
+        url = "https://api.certspotter.com/v1/issuances"
+        params = {"domain": apex, "expand": "dns_names"}
+        response = requests.get(url, params=params, timeout=12, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return None
+    names = set()
+    for item in data or []:
+        for dns_name in item.get("dns_names", []) or []:
+            clean = str(dns_name).strip().lower().rstrip(".")
+            if clean and not clean.startswith("*.") and (clean == apex or clean.endswith("." + apex)):
+                names.add(clean)
+    return names
 
 
 def parse_hostsearch(text):

@@ -433,6 +433,79 @@ def adbit_query(ip, name):
         return None
 
 
+def nsec_mode_rows(nsec, nsec3):
+    rows = []
+    if nsec:
+        rows.append(("NSEC mode", "NSEC with opt-out off (zone is enumerable)"))
+    elif nsec3:
+        rows.append(("NSEC mode", "NSEC3 (hashed, resists enumeration)"))
+    else:
+        rows.append(("NSEC mode", "No NSEC/NSEC3 records (unsigned or hidden)"))
+    return rows
+
+
+def ns_identity_rows(resolver, nameservers):
+    rows = []
+    if not nameservers:
+        return rows
+    for ns in sorted(set(nameservers))[:3]:
+        target = ns.rstrip(".")
+        try:
+            result = query(resolver, target, "A")
+            addresses = result["records"]
+        except Exception:
+            addresses = []
+        if not addresses:
+            continue
+        nsid = nsid_query(addresses[0])
+        if nsid:
+            rows.append(("NSID " + target, nsid))
+        version = version_query(addresses[0])
+        if version:
+            rows.append(("NS version " + target, version))
+    if not rows:
+        rows.append(("NS identity", "Servers hide NSID and version (good)"))
+    return rows
+
+
+def nsid_query(ns_ip, timeout=4):
+    try:
+        import dns.edns
+        import dns.message
+        import dns.query
+        import dns.rdatatype
+        request = dns.message.make_query("example.com", dns.rdatatype.A)
+        request.use_edns(ednsflags=0, options=[dns.edns.GenericOption(3, b"")])
+        response = dns.query.udp(request, ns_ip, timeout=timeout)
+        for option in response.options:
+            if option.otype == 3 and option.data:
+                try:
+                    return bytes(option.data).decode("utf-8", "ignore").strip() or "(binary NSID)"
+                except Exception:
+                    return "(binary NSID)"
+    except Exception:
+        pass
+    return ""
+
+
+def version_query(ns_ip, timeout=4):
+    try:
+        import dns.message
+        import dns.query
+        import dns.rdataclass
+        import dns.rdatatype
+        request = dns.message.make_query("version.bind", dns.rdatatype.TXT, rdclass=dns.rdataclass.CH)
+        response = dns.query.udp(request, ns_ip, timeout=timeout)
+        for rrset in response.answer:
+            for item in rrset:
+                text = item.to_text().strip('"')
+                if text:
+                    return text[:120]
+    except Exception:
+        pass
+    return ""
+
+
 def compare_resolvers(host, system_a):
     rows = []
     system_set = set(system_a or [])
@@ -556,9 +629,12 @@ def collect(host, apex):
     if tlsa_found:
         data["tlsa"].extend(tlsa_found)
     if apex and apex != host:
-        query_type(resolver, apex, "NSEC3PARAM", rows, " (apex)")
+        nsec3 = query_type(resolver, apex, "NSEC3PARAM", rows, " (apex)")
+        nsec = query_type(resolver, apex, "NSEC", rows, " (apex)")
     else:
-        query_type(resolver, host, "NSEC3PARAM", rows, "")
+        nsec3 = query_type(resolver, host, "NSEC3PARAM", rows, "")
+        nsec = query_type(resolver, host, "NSEC", rows, "")
+    rows.extend(nsec_mode_rows(nsec, nsec3))
     rows.extend(parse_soa(data["soa_apex"] or data["soa"]))
     rows.extend(soa_timer_rows(data["soa_apex"] or data["soa"]))
     rows.extend(parse_caa(data["caa_apex"] or data["caa"]))
@@ -580,6 +656,7 @@ def collect(host, apex):
     rows.extend(check_axfr(resolver, data["ns_apex"] or data["ns"], zone))
     rows.extend(ns_diversity(resolver, data["ns_apex"] or data["ns"], zone))
     rows.extend(recursion_rows(resolver, data["ns_apex"] or data["ns"]))
+    rows.extend(ns_identity_rows(resolver, data["ns_apex"] or data["ns"]))
     if data["ds"] or data["dnskey"]:
         rows.append(("DNSSEC", "Signed (DS/DNSKEY records published)"))
     else:

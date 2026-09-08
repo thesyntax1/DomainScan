@@ -9,7 +9,7 @@ from domainscan.helpers import BROWSER_UA, short
 SKIP_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".css", ".js", ".zip", ".mp4", ".woff", ".woff2", ".ico", ".mp3")
 
 
-def collect(start_url, timeout=8, max_pages=15):
+def collect(start_url, timeout=8, max_pages=15, seed_urls=None):
     import requests
     rows = []
     if max_pages <= 0:
@@ -20,6 +20,13 @@ def collect(start_url, timeout=8, max_pages=15):
     session.headers.update({"User-Agent": BROWSER_UA})
     visited = {}
     queue = [start_url]
+    seeds = 0
+    for seed in seed_urls or []:
+        if seed not in queue and same_host(seed, base_host) and not skipped(seed):
+            queue.append(seed)
+            seeds += 1
+    if seeds:
+        rows.append(("Sitemap seeds", str(seeds) + " starting URLs from sitemap"))
     while queue and len(visited) < max_pages:
         batch = []
         for url in queue[:8]:
@@ -84,6 +91,15 @@ def collect(start_url, timeout=8, max_pages=15):
     rows.append(("Status codes", summary))
     if slowest[0]:
         rows.append(("Slowest page", str(slowest[1]) + " ms " + short(slowest[0], 140)))
+    logins = []
+    for url, (status, text, size, elapsed) in visited.items():
+        low = (text or "").lower()
+        if status == 200 and ('type="password"' in low or "type='password'" in low):
+            logins.append(url)
+    if logins:
+        rows.append(("Login pages found", str(len(logins))))
+        for url in logins[:5]:
+            rows.append(("Login page", short(url, 160)))
     rows.append(("Broken pages", str(len(broken))))
     for url, status in broken[:10]:
         rows.append(("Broken", str(status) + " " + short(url, 160)))

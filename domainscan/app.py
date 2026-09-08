@@ -31,6 +31,8 @@ class DomainScanApp:
         self.queue = queue.Queue()
         self.result = None
         self.all_rows = []
+        self.watch_stop = None
+        self.watch_log = None
         self.scanning = False
         self.ports_var = tk.BooleanVar(value=True)
         self.sub_var = tk.BooleanVar(value=True)
@@ -56,6 +58,8 @@ class DomainScanApp:
         scan_menu = tk.Menu(menubar, tearoff=0)
         scan_menu.add_command(label="Start Scan", command=self.start_scan)
         scan_menu.add_command(label="Compare with Previous", command=self.compare_scan)
+        scan_menu.add_command(label="Scan History...", command=self.open_history)
+        scan_menu.add_command(label="Watch Target...", command=self.open_watch)
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(label="WHOIS Lookup", command=self.open_whois_lookup)
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -255,6 +259,17 @@ class DomainScanApp:
                     self.fail_scan("Invalid target: " + message[1])
                 elif kind == "error":
                     self.fail_scan("Scan failed: " + message[1])
+                elif kind == "watch":
+                    if self.watch_log is not None:
+                        try:
+                            self.watch_log.insert(tk.END, message[1])
+                            self.watch_log.see(tk.END)
+                        except Exception:
+                            pass
+                    self.status_label.configure(text=message[1][:120])
+                elif kind == "watch_done":
+                    self.watch_stop = None
+                    self.status_label.configure(text="Watch session finished.")
         except queue.Empty:
             pass
         self.root.after(120, self.poll_queue)
@@ -440,9 +455,13 @@ class DomainScanApp:
             messagebox.showinfo("No previous scans", "No earlier scan found for " + host + ".")
             return
         changes = history_store.diff_runs(previous, self.result)
+        self.show_changes(changes, "Compared with scan from " + str(previous["meta"].get("scanned_at", "earlier")) + ".")
+
+    def show_changes(self, changes, detail):
         merged = {"Changes": changes}
         for section, items in self.result["sections"].items():
-            merged[section] = items
+            if section != "Changes":
+                merged[section] = items
         self.result["sections"] = merged
         self.all_rows = []
         for section, items in merged.items():
@@ -452,7 +471,206 @@ class DomainScanApp:
         self.section_box.configure(values=sections)
         self.section_box.set("Changes")
         self.apply_filter()
-        self.set_detail("Compared with scan from " + str(previous["meta"].get("scanned_at", "earlier")) + ". " + str(len(changes)) + " change rows.")
+        self.set_detail(detail + " " + str(len(changes)) + " change rows.")
+
+    def open_history(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Scan History")
+        dialog.geometry("760x520")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        top = ttk.Frame(dialog, padding=10)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Host:").pack(side=tk.LEFT, padx=(0, 6))
+        entry = ttk.Entry(top, width=40)
+        entry.pack(side=tk.LEFT, padx=(0, 8))
+        if self.result:
+            entry.insert(0, self.result["target"]["host"])
+        else:
+            entry.insert(0, self.target_entry.get().strip() or "example.com")
+        runs = []
+
+        def refresh():
+            runs.clear()
+            box.delete(0, tk.END)
+            host = entry.get().strip()
+            if not host:
+                return
+            try:
+                paths = history_store.list_runs(host)
+            except Exception:
+                return
+            for path in paths[:50]:
+                try:
+                    data = history_store.load_run(path)
+                    label = str(data["meta"].get("scanned_at", "?")) + "  (" + str(data["meta"].get("findings", "?")) + " findings)"
+                except Exception:
+                    label = path + " (unreadable)"
+                runs.append(path)
+                box.insert(tk.END, label)
+            status.configure(text=str(len(runs)) + " saved scans for " + host)
+
+        def load_selected():
+            picked = box.curselection()
+            if not picked or self.scanning:
+                return
+            try:
+                data = history_store.load_run(runs[picked[0]])
+            except Exception as exc:
+                messagebox.showerror("DomainScan", "Could not load that scan (" + exc.__class__.__name__ + ").")
+                return
+            self.result = data
+            self.progress.configure(value=100)
+            meta = data["meta"]
+            self.status_label.configure(text="Loaded saved scan.")
+            self.count_label.configure(text=str(meta.get("findings", "?")) + " findings")
+            self.all_rows = []
+            for section, items in data["sections"].items():
+                for key, value in items:
+                    self.all_rows.append((section, key, value))
+            self.section_box.configure(values=["All sections"] + list(data["sections"].keys()))
+            self.apply_filter()
+            self.set_detail("Loaded scan of " + data["target"].get("host", "?") + " from " + str(meta.get("scanned_at", "?")) + ".")
+            dialog.destroy()
+
+        def compare_selected():
+            picked = box.curselection()
+            if len(picked) != 2:
+                messagebox.showinfo("Select two scans", "Select exactly two scans to compare (Ctrl+click).")
+                return
+            first = history_store.load_run(runs[picked[0]])
+            second = history_store.load_run(runs[picked[1]])
+            if first["meta"].get("scanned_at", "") > second["meta"].get("scanned_at", ""):
+                first, second = second, first
+            self.result = second
+            changes = history_store.diff_runs(first, second)
+            self.show_changes(changes, "Compared " + str(first["meta"].get("scanned_at", "?")) + " with " + str(second["meta"].get("scanned_at", "?")) + ".")
+            dialog.destroy()
+
+        ttk.Button(top, text="Refresh", command=refresh).pack(side=tk.LEFT)
+        box = tk.Listbox(dialog, bg=ENTRY_BG, fg=TEXT, selectmode=tk.EXTENDED, font=("Consolas", 10))
+        box.pack(fill=tk.BOTH, expand=True, padx=10)
+        bottom = ttk.Frame(dialog, padding=10)
+        bottom.pack(fill=tk.X)
+        ttk.Button(bottom, text="Load", command=load_selected).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(bottom, text="Compare Selected", command=compare_selected).pack(side=tk.LEFT)
+        status = ttk.Label(bottom, text="")
+        status.pack(side=tk.LEFT, padx=(12, 0))
+        refresh()
+
+    def open_watch(self):
+        if self.watch_stop is not None and not self.watch_stop.is_set():
+            messagebox.showinfo("Watch running", "A watch session is already running. Stop it first.")
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Watch Target")
+        dialog.geometry("680x460")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        top = ttk.Frame(dialog, padding=10)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Target:").pack(side=tk.LEFT, padx=(0, 6))
+        entry = ttk.Entry(top, width=30)
+        entry.pack(side=tk.LEFT, padx=(0, 8))
+        entry.insert(0, self.target_entry.get().strip() or "example.com")
+        ttk.Label(top, text="Every (sec):").pack(side=tk.LEFT, padx=(0, 6))
+        interval_entry = ttk.Entry(top, width=8)
+        interval_entry.pack(side=tk.LEFT, padx=(0, 8))
+        interval_entry.insert(0, "300")
+        ttk.Label(top, text="Rounds:").pack(side=tk.LEFT, padx=(0, 6))
+        rounds_entry = ttk.Entry(top, width=6)
+        rounds_entry.pack(side=tk.LEFT)
+        rounds_entry.insert(0, "0")
+        log = tk.Listbox(dialog, bg=ENTRY_BG, fg=TEXT, font=("Consolas", 10))
+        log.pack(fill=tk.BOTH, expand=True, padx=10)
+        self.watch_log = log
+        bottom = ttk.Frame(dialog, padding=10)
+        bottom.pack(fill=tk.X)
+        start_button = ttk.Button(bottom, text="Start")
+        stop_button = ttk.Button(bottom, text="Stop", state="disabled")
+        start_button.pack(side=tk.LEFT, padx=(0, 8))
+        stop_button.pack(side=tk.LEFT)
+
+        def watch_worker(target, interval, rounds, stop_event):
+            caps = profiles.get_profile("Quick")
+            round_no = 0
+            while not stop_event.is_set():
+                round_no += 1
+                self.queue.put(("watch", "Round " + str(round_no) + ": scanning " + target + "..."))
+                try:
+                    result = scanner.run_scan(
+                        target,
+                        include_ports=False,
+                        include_subdomains=caps["include_subdomains"],
+                        timeout=caps["timeout"],
+                        crawl_pages=0,
+                        js_files=0,
+                        subdomain_web=0,
+                        include_recon=False,
+                    )
+                except Exception as exc:
+                    self.queue.put(("watch", "Round " + str(round_no) + " failed (" + exc.__class__.__name__ + ")."))
+                    result = None
+                if result is not None:
+                    try:
+                        history_store.save_run(result)
+                        history_store.prune_old(result["target"]["host"])
+                        previous = history_store.previous_run(result["target"]["host"], result["meta"]["scanned_at"])
+                    except Exception:
+                        previous = None
+                    if not previous:
+                        self.queue.put(("watch", "Round " + str(round_no) + ": baseline saved (" + str(result["meta"]["findings"]) + " findings)."))
+                    else:
+                        rows = history_store.diff_runs(previous, result)
+                        summary = {key: value for key, value in rows if key in ("Added", "Removed", "Changed")}
+                        line = "Round " + str(round_no) + ": +" + summary.get("Added", "0") + "/-" + summary.get("Removed", "0") + "/~" + summary.get("Changed", "0")
+                        self.queue.put(("watch", line))
+                        for key, value in rows:
+                            if key in ("Added finding", "Removed finding", "Changed finding"):
+                                self.queue.put(("watch", "  " + value[:160]))
+                if rounds > 0 and round_no >= rounds:
+                    break
+                for _ in range(max(interval, 5)):
+                    if stop_event.is_set():
+                        break
+                    stop_event.wait(1)
+            self.queue.put(("watch_done", None))
+
+        def start():
+            if self.scanning:
+                messagebox.showinfo("Busy", "A manual scan is running. Wait for it to finish first.")
+                return
+            try:
+                interval = int(interval_entry.get().strip())
+                rounds = int(rounds_entry.get().strip())
+            except ValueError:
+                messagebox.showwarning("Invalid numbers", "Interval and rounds must be whole numbers.")
+                return
+            target = entry.get().strip()
+            if not target:
+                messagebox.showwarning("Missing target", "Enter a domain or URL to watch.")
+                return
+            stop_event = threading.Event()
+            self.watch_stop = stop_event
+            start_button.configure(state="disabled")
+            stop_button.configure(state="normal")
+            thread = threading.Thread(target=watch_worker, args=(target, interval, rounds, stop_event), daemon=True)
+            thread.start()
+
+        def stop():
+            if self.watch_stop is not None:
+                self.watch_stop.set()
+            start_button.configure(state="normal")
+            stop_button.configure(state="disabled")
+
+        def on_close():
+            stop()
+            self.watch_log = None
+            dialog.destroy()
+
+        start_button.configure(command=start)
+        stop_button.configure(command=stop)
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
 
     def open_whois_lookup(self):
         dialog = tk.Toplevel(self.root)

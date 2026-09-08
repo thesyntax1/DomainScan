@@ -145,9 +145,18 @@ def collect(host, enabled=True):
     web_ports = [item["port"] for item in opened if item["port"] in WEB_PROBE_PORTS]
     for port in sorted(web_ports):
         rows.append(("Port " + str(port) + " web", probe_web_port(host, port)))
+    other_open = [item["port"] for item in opened if item["port"] not in WEB_PROBE_PORTS]
+    for port in sorted(other_open):
+        found = probe_unexpected_http(host, port)
+        if found:
+            rows.append(("Port " + str(port) + " HTTP", found))
     tls_ports = [item["port"] for item in opened if item["port"] in TLS_PORTS]
     for port in sorted(tls_ports):
         rows.append(("Port " + str(port) + " TLS", tls_detect(host, port)))
+    for port in sorted(other_open):
+        detail = tls_detect(host, port)
+        if detail.startswith("TLS service"):
+            rows.append(("Port " + str(port) + " TLS", detail + " (unexpected TLS)"))
     if any(item["port"] == 21 for item in opened):
         rows.append(("FTP anonymous", ftp_anonymous(host)))
     rows.append(("UDP port 53", udp_dns_probe(host)))
@@ -173,6 +182,24 @@ def banner_verdict(port, banner):
         if match:
             rows.append(("MySQL version", match.group(1)))
     return rows
+
+
+def probe_unexpected_http(host, port, timeout=4):
+    import requests
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        pass
+    for scheme in ("http", "https"):
+        url = scheme + "://" + host + ":" + str(port) + "/"
+        try:
+            response = requests.get(url, timeout=timeout, headers={"User-Agent": BROWSER_UA}, verify=False)
+        except Exception:
+            continue
+        if response.status_code:
+            return scheme.upper() + " answers (HTTP " + str(response.status_code) + ")"
+    return ""
 
 
 def tls_detect(host, port, timeout=5):

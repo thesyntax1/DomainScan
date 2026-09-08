@@ -36,7 +36,12 @@ def collect(host, apex, dns_data):
     rows.extend(describe_bimi_mtasts(resolver, name))
     rows.extend(describe_tlsrpt(resolver, name))
     rows.extend(describe_autoconfig(resolver, name))
-    rows.extend(describe_mta_sts_policy(name))
+    mx_hosts = []
+    for record in mx_records:
+        bits = record.split()
+        if len(bits) >= 2:
+            mx_hosts.append(bits[1].rstrip(".").lower())
+    rows.extend(describe_mta_sts_policy(name, mx_hosts=mx_hosts))
     return {"rows": rows}
 
 
@@ -70,13 +75,16 @@ def describe_mx(records, resolver=None):
         except Exception:
             rows.append(("MX " + str(index) + " addresses", "Does not resolve"))
         if addresses:
-            rows.append(("MX " + str(index) + " PTR", mx_ptr(addresses[0])))
+            ptr = mx_ptr(addresses[0])
+            rows.append(("MX " + str(index) + " PTR", ptr))
+            rows.append(("MX " + str(index) + " FCrDNS", mx_forward_confirm(ptr, addresses[0])))
         rows.append(("MX " + str(index) + " SMTP", smtp_probe(target)))
         rows.append(("MX " + str(index) + " STARTTLS", smtp_starttls(target)))
         if index <= 2:
             rows.extend(smtp_ehlo_rows(target, index))
         if index == 1:
             rows.extend(smtp_tls_cert_rows(target))
+            rows.extend(smtp_vrfy_rows(target))
         if resolver is not None and index <= 3:
             rows.append(("MX " + str(index) + " DANE", dane_status(resolver, target)))
     return rows
@@ -98,6 +106,18 @@ def mx_ptr(ip):
         return name
     except Exception:
         return "No PTR record"
+
+
+def mx_forward_confirm(ptr, ip):
+    if not ptr or ptr == "No PTR record":
+        return "Skipped (no PTR)"
+    try:
+        forward = socket.gethostbyname_ex(ptr)[2]
+    except Exception:
+        return "Reverse name does not resolve forward"
+    if ip in forward:
+        return "Confirmed (forward matches)"
+    return "Mismatch (forward gives " + ", ".join(forward[:3]) + ")"
 
 
 def smtp_probe(target):
@@ -257,6 +277,53 @@ def smtp_tls_cert_rows(target):
     if match:
         rows.append(("MX 1 cert subject", short(match.group(1).strip(), 160)))
     return rows
+
+
+def smtp_vrfy_rows(target):
+    rows = []
+    try:
+        sock = socket.create_connection((target, 25), timeout=6)
+    except Exception:
+        return rows
+    try:
+        banner = read_smtp(sock)
+        if not banner.startswith("220"):
+            return rows
+        sock.sendall(b"EHLO domainscan\r\n")
+        read_smtp(sock)
+        sock.sendall(b"VRFY root\r\n")
+        vrfy = read_smtp(sock)
+        sock.sendall(b"EXPN root\r\n")
+        expn = read_smtp(sock)
+        try:
+            sock.sendall(b"QUIT\r\n")
+        except Exception:
+            pass
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return rows
+    try:
+        sock.close()
+    except Exception:
+        pass
+    rows.append(("MX 1 VRFY", vrfy_verdict(vrfy, "VRFY")))
+    rows.append(("MX 1 EXPN", vrfy_verdict(expn, "EXPN")))
+    return rows
+
+
+def vrfy_verdict(reply, command):
+    first = (reply or "").splitlines()
+    code = first[0][:3] if first else ""
+    if code in ("250", "251", "252"):
+        return command + " accepted (user enumeration possible)"
+    if code in ("502", "504", "500"):
+        return command + " disabled (good)"
+    if code:
+        return command + " answered " + code
+    return command + " gave no answer"
 
 
 def smtp_starttls(target, port=25):
@@ -477,6 +544,8 @@ def describe_dkim(resolver, name):
         bits = dkim_key_bits(value)
         if bits:
             rows.append(("DKIM " + selector + " key", "~" + str(bits) + "-bit RSA"))
+            if bits < 1024:
+                rows.append(("DKIM " + selector + " strength", "Under 1024 bits (weak, upgrade key)"))
     return rows
 
 
@@ -558,7 +627,7 @@ def describe_tlsrpt(resolver, name):
     return rows
 
 
-def describe_mta_sts_policy(name, base_url=None):
+def describe_mta_sts_policy(name, base_url=None, mx_hosts=None):
     import requests
     from domainscan.helpers import BROWSER_UA
     rows = []
@@ -594,6 +663,29 @@ def describe_mta_sts_policy(name, base_url=None):
     rows.append(("MTA-STS MX patterns", str(len(mx_list))))
     for index, pattern in enumerate(mx_list[:5], 1):
         rows.append(("MTA-STS MX " + str(index), short(pattern.strip(), 120)))
+    rows.extend(mta_sts_mx_match(mx_list, mx_hosts or []))
+    return rows
+
+
+def mta_sts_mx_match(patterns, mx_hosts):
+    import fnmatch
+    rows = []
+    if not patterns or not mx_hosts:
+        return rows
+    uncovered = []
+    for host in mx_hosts:
+        matched = False
+        for pattern in patterns:
+            clean = pattern.strip().lower()
+            if fnmatch.fnmatch(host, clean):
+                matched = True
+                break
+        if not matched:
+            uncovered.append(host)
+    if uncovered:
+        rows.append(("MTA-STS coverage", str(len(uncovered)) + " MX hosts not matched: " + short(", ".join(uncovered[:4]), 180)))
+    else:
+        rows.append(("MTA-STS coverage", "All MX hosts match policy patterns"))
     return rows
 
 
