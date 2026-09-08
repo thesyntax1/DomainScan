@@ -6,16 +6,14 @@ from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, 
 
 
 def safe_run(func):
+    # Each check already retries transient network/DNS failures internally
+    # (helpers.fetch_json / fetch_text / dns_check.query). Re-running the whole
+    # check here only doubled slow sections, so a single guarded attempt is
+    # enough and keeps every profile snappy.
     try:
         return func()
-    except (ValueError, TypeError, KeyError, AttributeError, IndexError) as exc:
-        return {"rows": [("Status", "Check failed (" + exc.__class__.__name__ + ": " + helpers.short(str(exc), 160) + ")")]}
     except Exception as exc:
-        time.sleep(1)
-        try:
-            return func()
-        except Exception as retry_exc:
-            return {"rows": [("Status", "Check failed (" + retry_exc.__class__.__name__ + ": " + helpers.short(str(retry_exc), 160) + ")")]}
+        return {"rows": [("Status", "Check failed (" + exc.__class__.__name__ + ": " + helpers.short(str(exc), 160) + ")")]}
 
 
 def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomains=True, timeout=12, crawl_pages=15, js_files=6, subdomain_web=20, include_recon=True):
@@ -42,7 +40,7 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
 
     emit(8, "Querying DNS records")
     try:
-        dns_result = dns_check.collect(host, apex)
+        dns_result = dns_check.collect(host, apex, extras=include_recon)
     except Exception as exc:
         dns_result = {"rows": [("DNS status", "Check failed (" + exc.__class__.__name__ + ")")], "data": {}}
     sections["DNS"] = dns_result["rows"]
@@ -53,17 +51,17 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
         ("WHOIS / RDAP", "Querying WHOIS and RDAP", lambda: whois_check.collect(apex if apex else host, host)),
         ("Subdomains", "Discovering subdomains", lambda: subdomain_check.collect(apex, include_subdomains)),
         ("Network", "Looking up IP and geolocation", lambda: network_check.collect(ips, host)),
-        ("BGP", "Looking up BGP and ASN", lambda: bgp_check.collect(ips)),
-        ("Reputation", "Checking blocklists", lambda: reputation_check.collect(ips, domain=apex)),
+        ("BGP", "Looking up BGP and ASN", lambda: bgp_check.collect(ips) if include_recon else {"rows": [("BGP", "Skipped (Quick profile)")]}),
+        ("Reputation", "Checking blocklists", lambda: reputation_check.collect(ips, domain=apex) if include_recon else {"rows": [("Blocklists", "Skipped (Quick profile)")]}),
         ("Certificates", "Querying certificate logs", lambda: crtsh_check.collect(apex, timeout) if include_recon else {"rows": [("Certificates", "Skipped (Quick profile)")]}),
         ("Typosquat", "Checking lookalike domains", lambda: typo_check.collect(apex, include_recon)),
         ("Threat Intel", "Querying threat feeds", lambda: threat_check.collect(host, apex, timeout) if include_recon else {"rows": [("Threat Intel", "Skipped (Quick profile)")]}),
         ("Common Crawl", "Querying Common Crawl", lambda: commoncrawl_check.collect(host, timeout) if include_recon else {"rows": [("Common Crawl", "Skipped (Quick profile)")]}),
         ("Website", "Fetching website", lambda: http_check.collect_http(fetch_url, timeout)),
-        ("TLS", "Checking TLS certificate", lambda: http_check.collect_tls(host, 443)),
+        ("TLS", "Checking TLS certificate", lambda: http_check.collect_tls(host, 443, deep=include_recon)),
         ("Site Files", "Fetching robots and sitemaps", lambda: files_check.collect(info["base_url"], timeout)),
-        ("Mail", "Checking mail authentication", lambda: mail_check.collect(host, apex, dns_data)),
-        ("Web History", "Checking web archive", lambda: history_check.collect(host, fetch_url)),
+        ("Mail", "Checking mail authentication", lambda: mail_check.collect(host, apex, dns_data, deep=include_recon)),
+        ("Web History", "Checking web archive", lambda: history_check.collect(host, fetch_url) if include_recon else {"rows": [("Web History", "Skipped (Quick profile)")]}),
         ("Ports", "Probing common ports", lambda: ports_check.collect(host, include_ports)),
     ]
     results = {}
@@ -109,7 +107,7 @@ def run_scan(raw_target, on_progress=None, include_ports=True, include_subdomain
     html = web.get("html", "")
     final_url = web.get("final_url", fetch_url)
     post_jobs = [
-        ("Web Extras", lambda: web_extra_check.collect(info["base_url"], web.get("headers", {}), timeout)),
+        ("Web Extras", lambda: web_extra_check.collect(info["base_url"], web.get("headers", {}), timeout, deep=include_recon)),
         ("Crawl", lambda: crawl_check.collect(final_url, timeout, crawl_pages, results["Site Files"].get("sitemap_urls", [])) if html else {"rows": [("Crawl", "Skipped (no page content)")]}),
         ("JS Analysis", lambda: js_check.collect(final_url, html, timeout, js_files) if html else {"rows": [("JS analysis", "Skipped (no page content)")]}),
         ("Subdomain Web", lambda: subdomain_check.probe_web(confirmed, subdomain_web, timeout) if confirmed and subdomain_web > 0 else {"rows": [("Subdomain web", "Skipped")]}),

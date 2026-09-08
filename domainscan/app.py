@@ -1,4 +1,6 @@
+import os
 import queue
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -8,6 +10,19 @@ from domainscan import __version__, helpers, history_store, i18n, profiles, scan
 
 APP_TITLE = "DomainScan"
 APP_SUBTITLE = "Legal website and domain intelligence"
+
+
+def asset_path(name):
+    """Locate a bundled asset in both source and frozen (PyInstaller) runs."""
+    candidates = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(os.path.join(base, "domainscan", "assets", name))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
 
 BG = "#151a21"
 PANEL = "#1e242d"
@@ -40,6 +55,7 @@ class DomainScanApp:
         self.ports_var = tk.BooleanVar(value=True)
         self.sub_var = tk.BooleanVar(value=True)
         self.caps = profiles.get_profile("Standard")
+        self.load_branding()
         self.setup_style()
         self.build_menu()
         self.build_header()
@@ -102,9 +118,35 @@ class DomainScanApp:
         style.configure("Treeview.Heading", background=PANEL2, foreground=TEXT, font=("Segoe UI", 10, "bold"), padding=6)
         style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "white")])
 
+    def load_branding(self):
+        self.logo_image = None
+        logo_path = asset_path("logo.png")
+        if logo_path:
+            try:
+                self.logo_image = tk.PhotoImage(file=logo_path)
+                if self.logo_image.width() > 96:
+                    factor = max(1, self.logo_image.width() // 96)
+                    self.logo_image = self.logo_image.subsample(factor, factor)
+            except Exception:
+                self.logo_image = None
+        ico_path = asset_path("icon.ico")
+        try:
+            if ico_path and sys.platform.startswith("win"):
+                self.root.iconbitmap(ico_path)
+        except Exception:
+            pass
+        if self.logo_image is not None:
+            try:
+                self.root.iconphoto(True, self.logo_image)
+            except Exception:
+                pass
+
     def build_header(self):
         header = ttk.Frame(self.root)
         header.pack(fill="x", padx=16, pady=(14, 4))
+        if self.logo_image is not None:
+            logo = tk.Label(header, image=self.logo_image, bg=BG)
+            logo.pack(side="left", padx=(0, 10))
         title = tk.Label(header, text=APP_TITLE, font=("Segoe UI", 22, "bold"), bg=BG, fg=TEXT)
         title.pack(side="left")
         self.subtitle_label = tk.Label(header, text="  " + self.t("subtitle"), font=("Segoe UI", 11), bg=BG, fg=MUTED)

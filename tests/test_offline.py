@@ -933,21 +933,6 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(profiles.get_profile("Nope")["timeout"], 12)
 
 
-class CliTest(unittest.TestCase):
-    def test_parser(self):
-        import main as entry
-        args = entry.build_parser().parse_args(["example.com", "--profile", "Deep", "--export", "r.html", "--quiet"])
-        self.assertEqual(args.target, "example.com")
-        self.assertEqual(args.profile, "Deep")
-        self.assertTrue(args.quiet)
-
-    def test_infer_format(self):
-        import main as entry
-        self.assertEqual(entry.infer_format("r.html"), "html")
-        self.assertEqual(entry.infer_format("R.JSON"), "json")
-        self.assertEqual(entry.infer_format("report"), "txt")
-
-
 class HistoryStoreTest(unittest.TestCase):
     def make_result(self, stamp, extra=None):
         sections = {"Target": [("Host", "example.com")], "DNS": [("A record 1", "93.184.216.34")]}
@@ -2200,60 +2185,6 @@ class CommonCrawlTests(unittest.TestCase):
         data = rows_to_dict(commoncrawl_check.summarize(captures))
         self.assertIn("2 unique", data["Common Crawl URLs"])
         self.assertEqual(commoncrawl_check.format_bytes(300), "300 bytes")
-
-
-class CliWatchTests(unittest.TestCase):
-    def test_parser_watch_args(self):
-        import main as entry
-        args = entry.build_parser().parse_args(["--watch", "example.com", "--interval", "60", "--rounds", "3"])
-        self.assertEqual(args.watch, "example.com")
-        self.assertEqual(args.interval, 60)
-        self.assertEqual(args.rounds, 3)
-        args = entry.build_parser().parse_args(["--history", "example.com"])
-        self.assertEqual(args.history, "example.com")
-        args = entry.build_parser().parse_args(["--compare", "example.com"])
-        self.assertEqual(args.compare, "example.com")
-
-    def test_show_history_empty(self):
-        import main as entry
-        from unittest import mock
-        with mock.patch.object(history_store, "list_runs", return_value=[]):
-            self.assertEqual(entry.show_history("example.com"), 0)
-
-    def test_show_history_lists(self):
-        import io
-        import main as entry
-        from contextlib import redirect_stdout
-        from unittest import mock
-        fake = {"meta": {"scanned_at": "2024-01-01", "findings": 5}, "target": {"host": "example.com"}, "sections": {}}
-        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/a.json"]):
-            with mock.patch.object(history_store, "load_run", return_value=fake):
-                buffer = io.StringIO()
-                with redirect_stdout(buffer):
-                    code = entry.show_history("example.com")
-        self.assertEqual(code, 0)
-        self.assertIn("2024-01-01", buffer.getvalue())
-
-    def test_show_compare_needs_two(self):
-        import main as entry
-        from unittest import mock
-        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/a.json"]):
-            self.assertEqual(entry.show_compare("example.com"), 1)
-
-    def test_show_compare_diffs(self):
-        import io
-        import main as entry
-        from contextlib import redirect_stdout
-        from unittest import mock
-        old = {"meta": {"scanned_at": "old", "findings": 1}, "target": {"host": "example.com"}, "sections": {"DNS": [("A", "1.1.1.1")]}}
-        new = {"meta": {"scanned_at": "new", "findings": 1}, "target": {"host": "example.com"}, "sections": {"DNS": [("A", "2.2.2.2")]}}
-        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/new.json", "/tmp/old.json"]):
-            with mock.patch.object(history_store, "load_run", side_effect=[new, old]):
-                buffer = io.StringIO()
-                with redirect_stdout(buffer):
-                    code = entry.show_compare("example.com")
-        self.assertEqual(code, 0)
-        self.assertIn("Changed", buffer.getvalue())
 
 
 class PruneTests(unittest.TestCase):

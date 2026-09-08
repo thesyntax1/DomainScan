@@ -31,8 +31,8 @@ DNSKEY_ALGORITHMS = {
 
 def make_resolver():
     resolver = dns.resolver.Resolver()
-    resolver.timeout = 3.0
-    resolver.lifetime = 8.0
+    resolver.timeout = 2.5
+    resolver.lifetime = 6.0
     resolver.rotate = True
     return resolver
 
@@ -592,7 +592,7 @@ def nsec_mode_rows(nsec, nsec3):
     return rows
 
 
-def ns_identity_rows(resolver, nameservers):
+def ns_identity_rows(resolver, nameservers, zone=""):
     rows = []
     if not nameservers:
         return rows
@@ -605,7 +605,7 @@ def ns_identity_rows(resolver, nameservers):
             addresses = []
         if not addresses:
             continue
-        nsid = nsid_query(addresses[0])
+        nsid = nsid_query(addresses[0], zone)
         if nsid:
             rows.append(("NSID " + target, nsid))
         version = version_query(addresses[0])
@@ -616,13 +616,13 @@ def ns_identity_rows(resolver, nameservers):
     return rows
 
 
-def nsid_query(ns_ip, timeout=4):
+def nsid_query(ns_ip, zone="", timeout=4):
     try:
         import dns.edns
         import dns.message
         import dns.query
         import dns.rdatatype
-        request = dns.message.make_query("example.com", dns.rdatatype.A)
+        request = dns.message.make_query(zone or ".", dns.rdatatype.SOA)
         request.use_edns(ednsflags=0, options=[dns.edns.GenericOption(3, b"")])
         response = dns.query.udp(request, ns_ip, timeout=timeout)
         for option in response.options:
@@ -732,7 +732,7 @@ def check_axfr(resolver, nameservers, apex):
     return rows
 
 
-def collect(host, apex):
+def collect(host, apex, extras=True):
     rows = []
     data = {
         "a": [], "aaaa": [], "cname": [],
@@ -749,83 +749,147 @@ def collect(host, apex):
         rows.append(("DNS resolver", ", ".join(resolver.nameservers)))
     else:
         rows.append(("DNS resolver", "system default"))
-    data["a"] = query_type(resolver, host, "A", rows, "")
-    data["aaaa"] = query_type(resolver, host, "AAAA", rows, "")
-    data["cname"] = query_type(resolver, host, "CNAME", rows, "")
+
+    use_apex = bool(apex and apex != host)
+    zone = apex if apex else host
+    nsec_name = apex if use_apex else host
+    nsec_tag = " (apex)" if use_apex else ""
+
+    # Base record queries are independent, so run them concurrently. This keeps
+    # even Standard/Deep DNS collection fast instead of serialising ~20 lookups.
+    base_tasks = [
+        ("a", host, "A", ""),
+        ("aaaa", host, "AAAA", ""),
+        ("cname", host, "CNAME", ""),
+    ]
+    for rtype in DOMAIN_TYPES:
+        key = rtype.lower()
+        base_tasks.append((key, host, rtype, ""))
+        if use_apex:
+            base_tasks.append((key + "_apex", apex, rtype, " (apex)"))
+    base_tasks.append(("ds", apex if use_apex else host, "DS", " (apex)" if use_apex else ""))
+    base_tasks.append(("dnskey", apex if use_apex else host, "DNSKEY", " (apex)" if use_apex else ""))
+    base_tasks.append(("nsec", nsec_name, "NSEC", nsec_tag))
+    base_tasks.append(("nsec3param", nsec_name, "NSEC3PARAM", nsec_tag))
+
+    base_results = run_query_tasks(resolver, base_tasks)
+    data["a"] = base_results["a"]["records"]
+    data["aaaa"] = base_results["aaaa"]["records"]
+    data["cname"] = base_results["cname"]["records"]
+    for rtype in DOMAIN_TYPES:
+        key = rtype.lower()
+        data[key] = base_results[key]["records"]
+        apex_key = key + "_apex"
+        if apex_key in base_results:
+            data[apex_key] = base_results[apex_key]["records"]
+        else:
+            data[apex_key] = list(data[key])
+    data["ds"] = base_results["ds"]["records"]
+    data["dnskey"] = base_results["dnskey"]["records"]
+    for key, result in base_results.items():
+        rows.extend(result["rows"])
+
     if data["cname"]:
         rows.append(("CNAME target", data["cname"][0]))
         chain = follow_cname(resolver, host)
         if len(chain) > 1:
             rows.append(("CNAME chain", " -> ".join([host] + chain)))
-    for rtype in DOMAIN_TYPES:
-        key = rtype.lower()
-        data[key] = query_type(resolver, host, rtype, rows, "")
-        if apex and apex != host:
-            data[key + "_apex"] = query_type(resolver, apex, rtype, rows, " (apex)")
-        else:
-            data[key + "_apex"] = list(data[key])
-    if apex and apex != host:
-        data["ds"] = query_type(resolver, apex, "DS", rows, " (apex)")
-        data["dnskey"] = query_type(resolver, apex, "DNSKEY", rows, " (apex)")
-    else:
-        data["ds"] = query_type(resolver, host, "DS", rows, "")
-        data["dnskey"] = query_type(resolver, host, "DNSKEY", rows, "")
+
+    # Optional record types (SRV, HTTPS/SVCB, SSHFP, NAPTR, LOC, DNAME, TLSA).
+    optional_tasks = []
+    srv_keys = []
     for service in ("_https._tcp", "_http._tcp"):
-        found = query_type(resolver, service + "." + host, "SRV", rows, " (" + service + ")")
-        if found:
-            data["srv"].extend(found)
+        key = "srv" + service.replace("_", "").replace(".", "_")
+        optional_tasks.append((key, service + "." + host, "SRV", " (" + service + ")"))
+        srv_keys.append(key)
     for rtype in EXTRA_HOST_TYPES:
-        found = query_type(resolver, host, rtype, rows, "")
-        if found:
-            data[rtype.lower()].extend(found)
-    tlsa_found = query_type(resolver, "_443._tcp." + host, "TLSA", rows, " (_443._tcp)")
-    if tlsa_found:
-        data["tlsa"].extend(tlsa_found)
-    if apex and apex != host:
-        nsec3 = query_type(resolver, apex, "NSEC3PARAM", rows, " (apex)")
-        nsec = query_type(resolver, apex, "NSEC", rows, " (apex)")
-    else:
-        nsec3 = query_type(resolver, host, "NSEC3PARAM", rows, "")
-        nsec = query_type(resolver, host, "NSEC", rows, "")
+        optional_tasks.append((rtype.lower(), host, rtype, ""))
+    optional_tasks.append(("tlsa", "_443._tcp." + host, "TLSA", " (_443._tcp)"))
+    optional_results = run_query_tasks(resolver, optional_tasks)
+    for key, result in optional_results.items():
+        rows.extend(result["rows"])
+        if result["records"]:
+            if key in srv_keys:
+                data["srv"].extend(result["records"])
+            elif key == "tlsa":
+                data["tlsa"].extend(result["records"])
+            elif key in data:
+                data[key].extend(result["records"])
+
+    nsec = base_results["nsec"]["records"]
+    nsec3 = base_results["nsec3param"]["records"]
     rows.extend(nsec_mode_rows(nsec, nsec3))
-    if nsec:
-        if apex and apex != host:
-            rows.extend(nsec_walk_rows(resolver, apex))
-        else:
-            rows.extend(nsec_walk_rows(resolver, host))
+    if nsec and extras:
+        rows.extend(nsec_walk_rows(resolver, nsec_name))
     rows.extend(parse_soa(data["soa_apex"] or data["soa"]))
     rows.extend(soa_timer_rows(data["soa_apex"] or data["soa"]))
     rows.extend(parse_caa(data["caa_apex"] or data["caa"]))
     rows.extend(parse_ds(data["ds"]))
     rows.extend(parse_dnskey(data["dnskey"]))
-    if apex and apex != host:
-        rows.extend(ds_link_rows(resolver, apex))
-        rows.extend(rrsig_expiry_rows(resolver, apex))
-    else:
-        rows.extend(ds_link_rows(resolver, host))
-        rows.extend(rrsig_expiry_rows(resolver, host))
+    if extras:
+        rows.extend(ds_link_rows(resolver, zone))
+        rows.extend(rrsig_expiry_rows(resolver, zone))
     rows.extend(parse_tlsa(data["tlsa"]))
     rows.extend(parse_sshfp(data["sshfp"]))
     rows.extend(parse_srv(data["srv"]))
     rows.extend(parse_naptr(data["naptr"]))
     rows.extend(parse_https_svcb(data["https"], data["svcb"]))
     rows.extend(parse_loc(data["loc"]))
-    rows.extend(compare_resolvers(host, data["a"]))
-    data["doh"] = doh_compare(host, data["a"], rows)
     rows.extend(adbit_rows(apex or host))
-    if apex:
-        zone = apex
+    nameservers = data["ns_apex"] or data["ns"]
+    if extras:
+        rows.extend(compare_resolvers(host, data["a"]))
+        data["doh"] = doh_compare(host, data["a"], rows)
+        rows.extend(check_axfr(resolver, nameservers, zone))
+        rows.extend(recursion_rows(resolver, nameservers))
+        rows.extend(ns_identity_rows(resolver, nameservers, zone))
     else:
-        zone = host
-    rows.extend(check_axfr(resolver, data["ns_apex"] or data["ns"], zone))
-    rows.extend(ns_diversity(resolver, data["ns_apex"] or data["ns"], zone))
-    rows.extend(recursion_rows(resolver, data["ns_apex"] or data["ns"]))
-    rows.extend(ns_identity_rows(resolver, data["ns_apex"] or data["ns"]))
+        rows.append(("DNS extras", "Skipped (Quick profile: resolver comparison, DoH, AXFR, NS identity)"))
+    rows.extend(ns_diversity(resolver, nameservers, zone))
     if data["ds"] or data["dnskey"]:
         rows.append(("DNSSEC", "Signed (DS/DNSKEY records published)"))
     else:
         rows.append(("DNSSEC", "No DS/DNSKEY records found"))
     return {"rows": rows, "data": data}
+
+
+def run_query_tasks(resolver, tasks):
+    """Run several independent record lookups concurrently and return the
+    results keyed by task key, with display rows in submission order so the
+    UI stays deterministic regardless of which lookup finishes first."""
+    from concurrent.futures import ThreadPoolExecutor
+    raw = {}
+    with ThreadPoolExecutor(max_workers=min(10, max(len(tasks), 1))) as pool:
+        futures = {pool.submit(query, resolver, name, rtype): key for key, name, rtype, tag in tasks}
+        for future in futures:
+            key = futures[future]
+            try:
+                raw[key] = future.result()
+            except Exception:
+                raw[key] = {"records": [], "ttl": 0, "error": "LookupError"}
+    built = {}
+    for key, name, rtype, tag in tasks:
+        result = raw.get(key) or {"records": [], "ttl": 0, "error": ""}
+        rows = []
+        error = result.get("error", "")
+        records = result.get("records", [])
+        if error == "NXDOMAIN":
+            rows.append((rtype + " records" + tag, "NXDOMAIN (name does not exist)"))
+            records = []
+        elif error or not records:
+            rows.append((rtype + " records" + tag, "None found"))
+        else:
+            rows.append((rtype + " record count" + tag, str(len(records))))
+            if result.get("ttl"):
+                rows.append((rtype + " TTL" + tag, str(result["ttl"]) + " seconds"))
+            for index, record in enumerate(records, 1):
+                if rtype == "TXT":
+                    value = clean_txt(record)
+                else:
+                    value = record
+                rows.append((rtype + " record " + str(index) + tag, value))
+        built[key] = {"records": records, "rows": rows}
+    return built
 
 
 def collect_fallback(host, rows, data):

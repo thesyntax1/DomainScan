@@ -14,7 +14,7 @@ SENSITIVE_PATHS = [
 ]
 
 
-def collect(base_url, headers=None, timeout=10):
+def collect(base_url, headers=None, timeout=10, deep=True):
     import requests
     rows = []
     session = requests.Session()
@@ -30,11 +30,16 @@ def collect(base_url, headers=None, timeout=10):
     rows.extend(cdn_rows(headers or {}))
     rows.extend(redirect_rows(session, base_url, timeout))
     rows.extend(client_redirect_rows(session, base_url, timeout))
-    rows.extend(websocket_rows(session, base_url, timeout))
     rows.extend(host_injection_rows(session, base_url, timeout))
     rows.extend(probe_404(session, base_url, timeout))
-    rows.extend(sensitive_checks(session, base_url, timeout))
-    rows.extend(api_discovery(session, base_url, timeout))
+    # Deep-only probes add many more requests; skipping them on Quick keeps
+    # the scan snappy even against slow targets.
+    if deep:
+        rows.extend(websocket_rows(session, base_url, timeout))
+        rows.extend(sensitive_checks(session, base_url, timeout))
+        rows.extend(api_discovery(session, base_url, timeout))
+    else:
+        rows.append(("Web deep checks", "Skipped (Quick profile: WebSocket, sensitive paths, API discovery)"))
     return {"rows": rows}
 
 

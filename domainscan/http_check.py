@@ -463,7 +463,7 @@ def security_summary(headers):
     return rows
 
 
-def collect_tls(host, port=443):
+def collect_tls(host, port=443, deep=True):
     rows = []
     try:
         trusted, trust_error = verify_handshake(host, port)
@@ -496,12 +496,17 @@ def collect_tls(host, port=443):
     else:
         rows.append(("Chain trusted", "No: " + short(trust_error, 200)))
     rows.extend(parse_cert(cert, der, host))
-    rows.extend(openssl_chain(host, port))
-    rows.extend(openssl_cert_text(host, port))
-    rows.extend(ocsp_stapling(host, port))
-    rows.extend(session_reuse(host, port))
-    rows.extend(weak_cipher_probe(host, port))
-    rows.extend(accepted_cipher_rows(host, port))
+    # Deep-only probes: each of these shells out to openssl or opens extra
+    # sockets, so they are skipped on the Quick profile to keep it fast.
+    if deep:
+        rows.extend(openssl_chain(host, port))
+        rows.extend(openssl_cert_text(host, port))
+        rows.extend(ocsp_stapling(host, port))
+        rows.extend(session_reuse(host, port))
+        rows.extend(weak_cipher_probe(host, port))
+        rows.extend(accepted_cipher_rows(host, port))
+    else:
+        rows.append(("TLS deep checks", "Skipped (Quick profile: chain text, OCSP, ciphers, session reuse)"))
     return {"rows": rows}
 
 
