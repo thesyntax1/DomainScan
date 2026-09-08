@@ -62,6 +62,10 @@ python main.py
 
 Type a domain or URL (for example `example.com`) and press Scan. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens Scan History (load or compare earlier scans) and Watch Target (rescan periodically and report changes). The interface language can be switched from the header (🇬🇧 English, 🇹🇷 Türkçe, 🇪🇸 Español, 🇩🇪 Deutsch); menus, buttons, dialogs and section names follow immediately and the choice is remembered. Finding details stay in English as technical labels.
 
+## Windows executable
+
+No Python needed: download `DomainScan.exe` (desktop app) or `DomainScan-cli.exe` (command line) from the Releases page. Every `v*` tag is built automatically with PyInstaller on GitHub Actions and attached to its release. The binary is unsigned, so Windows SmartScreen may ask for confirmation on first run.
+
 ## Command line
 
 ```bash
