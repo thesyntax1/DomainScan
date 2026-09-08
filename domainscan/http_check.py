@@ -35,6 +35,11 @@ def collect_http(fetch_url, timeout=12):
         "status": 0,
         "cookies": [],
         "elapsed_ms": 0,
+        "total_ms": 0,
+        "ttfb_ms": 0,
+        "raw_bytes": 0,
+        "decoded_bytes": 0,
+        "http_version": "",
     }
     session = requests.Session()
     session.headers.update({
@@ -50,6 +55,22 @@ def collect_http(fetch_url, timeout=12):
         return result
     elapsed = int((time.perf_counter() - started) * 1000)
     result["elapsed_ms"] = elapsed
+    result["total_ms"] = elapsed
+    try:
+        result["ttfb_ms"] = int(response.elapsed.total_seconds() * 1000)
+    except Exception:
+        result["ttfb_ms"] = 0
+    decoded_size = len(response.content or b"")
+    result["decoded_bytes"] = decoded_size
+    try:
+        raw_hint = int(response.headers.get("Content-Length", "0") or 0)
+    except Exception:
+        raw_hint = 0
+    if response.headers.get("Content-Encoding", "") and raw_hint:
+        result["raw_bytes"] = raw_hint
+    else:
+        result["raw_bytes"] = decoded_size
+    result["http_version"] = http_version(response)
     result["status"] = response.status_code
     result["final_url"] = response.url
     result["headers"] = dict(response.headers)
@@ -67,6 +88,13 @@ def collect_http(fetch_url, timeout=12):
         rows.append(("HTTPS upgrade", "Yes, plain HTTP redirects to HTTPS"))
     rows.append(("HTTP status", str(response.status_code) + " " + (response.reason or "")))
     rows.append(("Response time", str(elapsed) + " ms"))
+    if result["ttfb_ms"]:
+        rows.append(("Time to first byte", str(result["ttfb_ms"]) + " ms"))
+    if result["http_version"]:
+        rows.append(("HTTP version", result["http_version"]))
+    if result["raw_bytes"] and result["decoded_bytes"] and result["raw_bytes"] != result["decoded_bytes"]:
+        saved = 100 - int(result["raw_bytes"] * 100 / result["decoded_bytes"])
+        rows.append(("Compression saving", str(saved) + "% (" + str(result["raw_bytes"]) + " of " + str(result["decoded_bytes"]) + " bytes)"))
     rows.append(("Body size", str(len(response.content or b"")) + " bytes"))
     rows.append(("Content type", response.headers.get("Content-Type", "Not specified")))
     rows.append(("Encoding", response.encoding or "Not specified"))
@@ -115,8 +143,17 @@ def collect_http(fetch_url, timeout=12):
     return result
 
 
+def http_version(response):
+    try:
+        code = response.raw.version
+    except Exception:
+        return ""
+    mapping = {9: "HTTP/0.9", 10: "HTTP/1.0", 11: "HTTP/1.1", 20: "HTTP/2"}
+    return mapping.get(code, "HTTP/" + str(code))
+
+
 def parse_set_cookie(header):
-    info = {"name": "", "secure": False, "httponly": False, "samesite": ""}
+    info = {"name": "", "secure": False, "httponly": False, "samesite": "", "domain": "", "path": "", "persistent": False}
     parts = (header or "").split(";")
     if parts:
         info["name"] = parts[0].split("=", 1)[0].strip()
@@ -132,6 +169,12 @@ def parse_set_cookie(header):
                 info["samesite"] = attr.split("=", 1)[1].strip()
             else:
                 info["samesite"] = "set"
+        elif low.startswith("domain="):
+            info["domain"] = attr.split("=", 1)[1].strip()
+        elif low.startswith("path="):
+            info["path"] = attr.split("=", 1)[1].strip()
+        elif low.startswith("expires=") or low.startswith("max-age="):
+            info["persistent"] = True
     return info
 
 
@@ -182,6 +225,137 @@ def cookie_flag_rows(raw_cookies):
         rows.append(("Cookie flags: " + name, ", ".join(flags)))
     rows.append(("Cookies missing Secure", str(insecure)))
     rows.append(("Cookies missing HttpOnly", str(script_readable)))
+    rows.extend(cookie_prefix_rows(raw_cookies))
+    return rows
+
+
+def cookie_prefix_rows(raw_cookies):
+    rows = []
+    for header in raw_cookies or []:
+        info = parse_set_cookie(header)
+        name = info["name"] or ""
+        if name.startswith("__Secure-") and not info["secure"]:
+            rows.append(("Cookie prefix: " + name, "Rejected by browsers (needs Secure)"))
+        if name.startswith("__Host-"):
+            problems = []
+            if not info["secure"]:
+                problems.append("needs Secure")
+            if info["path"] != "/":
+                problems.append("needs Path=/")
+            if info["domain"]:
+                problems.append("must not set Domain")
+            if problems:
+                rows.append(("Cookie prefix: " + name, "Rejected by browsers (" + ", ".join(problems) + ")"))
+            else:
+                rows.append(("Cookie prefix: " + name, "Valid __Host- cookie"))
+        if info["samesite"].lower() == "none" and not info["secure"]:
+            rows.append(("Cookie flags: " + name, "SameSite=None without Secure is rejected"))
+    return rows
+
+
+def parse_csp(value):
+    rows = []
+    directives = {}
+    for chunk in str(value or "").split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        bits = chunk.split()
+        directives[bits[0].lower()] = bits[1:]
+    rows.append(("CSP directives", str(len(directives))))
+    weak = []
+    for directive in ("script-src", "default-src"):
+        sources = directives.get(directive, [])
+        if "'unsafe-inline'" in sources:
+            weak.append(directive + " allows unsafe-inline")
+        if "'unsafe-eval'" in sources:
+            weak.append(directive + " allows unsafe-eval")
+        if "*" in sources:
+            weak.append(directive + " contains wildcard")
+        if "data:" in sources:
+            weak.append(directive + " allows data:")
+        if "http:" in sources:
+            weak.append(directive + " allows plain http")
+    if weak:
+        rows.append(("CSP weaknesses", "; ".join(weak[:4])))
+    else:
+        rows.append(("CSP weaknesses", "None spotted"))
+    for directive in ("default-src", "script-src", "object-src", "base-uri", "form-action", "frame-ancestors"):
+        if directive in directives:
+            rows.append(("CSP " + directive, short(" ".join(directives[directive][:8]), 200)))
+    if "object-src" not in directives:
+        rows.append(("CSP object-src", "Not set (plugins unrestricted)"))
+    if "report-uri" in directives or "report-to" in directives:
+        rows.append(("CSP reporting", "Configured"))
+    else:
+        rows.append(("CSP reporting", "Not configured"))
+    if "upgrade-insecure-requests" in directives:
+        rows.append(("CSP upgrade", "upgrade-insecure-requests set"))
+    return rows
+
+
+def parse_permissions_policy(value):
+    rows = []
+    if not value:
+        return rows
+    features = [chunk.strip() for chunk in str(value).split(",") if chunk.strip()]
+    rows.append(("Permissions features", str(len(features))))
+    disabled = []
+    for chunk in features:
+        if "=" in chunk:
+            name, setting = chunk.split("=", 1)
+            if setting.strip() in ("()", "none"):
+                disabled.append(name.strip())
+    if disabled:
+        rows.append(("Permissions disabled", ", ".join(disabled[:10])))
+    return rows
+
+
+def parse_link_header(value):
+    rows = []
+    if not value:
+        return rows
+    parts = [chunk.strip() for chunk in str(value).split(",") if chunk.strip()]
+    rows.append(("Link headers", str(len(parts))))
+    for rel in ("preload", "preconnect", "dns-prefetch", "modulepreload"):
+        items = [chunk.split(";")[0].strip("<> ") for chunk in parts if 'rel=' in chunk and rel in chunk.lower()]
+        if items:
+            rows.append(("Link " + rel, str(len(items)) + " (" + short(", ".join(items[:3]), 180) + ")"))
+    return rows
+
+
+def parse_server_timing(value):
+    rows = []
+    if not value:
+        return rows
+    metrics = []
+    for chunk in str(value).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        name = chunk.split(";")[0].strip()
+        duration = ""
+        for piece in chunk.split(";")[1:]:
+            piece = piece.strip()
+            if piece.lower().startswith("dur="):
+                duration = piece.split("=", 1)[1].strip()
+        if duration:
+            metrics.append(name + "=" + duration + "ms")
+        else:
+            metrics.append(name)
+    rows.append(("Server-Timing", short("; ".join(metrics[:8]), 220)))
+    return rows
+
+
+def x_header_inventory(headers):
+    rows = []
+    names = []
+    for name in headers:
+        low = str(name).lower()
+        if low.startswith("x-") and low not in ("x-content-type-options", "x-frame-options"):
+            names.append(str(name))
+    if names:
+        rows.append(("Custom X- headers", str(len(names)) + ": " + short(", ".join(sorted(names)[:15]), 220)))
     return rows
 
 
@@ -204,17 +378,11 @@ def security_summary(headers):
             rows.append(("HSTS preload", "Not enabled"))
     csp = headers.get("Content-Security-Policy", "")
     if csp:
-        weak = []
-        if "unsafe-inline" in csp:
-            weak.append("allows unsafe-inline")
-        if "unsafe-eval" in csp:
-            weak.append("allows unsafe-eval")
-        if "*" in csp:
-            weak.append("contains wildcard")
-        if weak:
-            rows.append(("CSP notes", ", ".join(weak)))
-        else:
-            rows.append(("CSP notes", "No obvious weak directives"))
+        rows.extend(parse_csp(csp))
+    rows.extend(parse_permissions_policy(headers.get("Permissions-Policy", "")))
+    rows.extend(parse_link_header(headers.get("Link", "")))
+    rows.extend(parse_server_timing(headers.get("Server-Timing", "")))
+    rows.extend(x_header_inventory(headers))
     server = headers.get("Server", "")
     if server:
         if re.search(r"\d", server):
@@ -226,6 +394,15 @@ def security_summary(headers):
         rows.append(("Powered-By exposed", short(powered, 120)))
     else:
         rows.append(("Powered-By exposed", "No"))
+    for extra in ("X-AspNet-Version", "X-Generator", "X-Drupal-Cache", "X-Varnish"):
+        if headers.get(extra, ""):
+            rows.append((extra + " exposed", short(headers.get(extra, ""), 120)))
+    etag = headers.get("ETag", "")
+    if etag:
+        if etag.startswith("W/"):
+            rows.append(("ETag strength", "Weak validator"))
+        else:
+            rows.append(("ETag strength", "Strong validator"))
     cache = headers.get("Cache-Control", "")
     if cache:
         rows.append(("Caching", short(cache, 200)))
@@ -278,6 +455,9 @@ def collect_tls(host, port=443):
         rows.append(("Chain trusted", "No: " + short(trust_error, 200)))
     rows.extend(parse_cert(cert, der, host))
     rows.extend(openssl_chain(host, port))
+    rows.extend(openssl_cert_text(host, port))
+    rows.extend(ocsp_stapling(host, port))
+    rows.extend(session_reuse(host, port))
     rows.extend(weak_cipher_probe(host, port))
     return {"rows": rows}
 
@@ -369,6 +549,117 @@ def weak_cipher_probe(host, port=443, timeout=10):
     except Exception:
         return [("Weak ciphers", "Probe failed")]
     return [("Weak ciphers", parse_weak_cipher_output((proc.stdout or "") + (proc.stderr or "")))]
+
+
+def openssl_cert_text(host, port=443, timeout=10):
+    import shutil
+    import subprocess
+    if not shutil.which("openssl"):
+        return []
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-showcerts"],
+            input="", capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return [("Certificate details", "Probe failed")]
+    match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", proc.stdout or "", re.DOTALL)
+    if not match:
+        return [("Certificate details", "No certificate captured")]
+    try:
+        proc2 = subprocess.run(
+            ["openssl", "x509", "-noout", "-text"],
+            input=match.group(0), capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return [("Certificate details", "Parse failed")]
+    return parse_openssl_text(proc2.stdout or "")
+
+
+def parse_openssl_text(text):
+    rows = []
+    match = re.search(r"Signature Algorithm:\s*(\S+)", text)
+    if match:
+        algo = match.group(1)
+        rows.append(("Signature algorithm", algo))
+        if "md5" in algo.lower() or "sha1" in algo.lower().replace("-", ""):
+            rows.append(("Signature verdict", "Weak hash (review)"))
+    match = re.search(r"Public-Key:\s*\((\d+) bit", text)
+    if match:
+        bits = int(match.group(1))
+        rows.append(("Public key size", str(bits) + " bits"))
+        if bits < 2048:
+            rows.append(("Key size verdict", "Under 2048 bits (weak)"))
+    match = re.search(r"ASN1 OID:\s*(\S+)", text)
+    if match:
+        rows.append(("EC curve", match.group(1)))
+    usages = re.search(r"X509v3 Key Usage:[^\n]*\n\s*(.+)", text)
+    if usages:
+        rows.append(("Key usage", short(usages.group(1).strip(), 160)))
+    ext_usages = re.search(r"X509v3 Extended Key Usage:[^\n]*\n\s*(.+)", text)
+    if ext_usages:
+        detail = ext_usages.group(1).strip()
+        rows.append(("Extended key usage", short(detail, 160)))
+        if "TLS Web Server Authentication" not in detail and "serverAuth" not in detail:
+            rows.append(("Server auth usage", "Missing (review)"))
+    if "CT Precertificate SCTs" in text:
+        count = len(re.findall(r"Signed Certificate Timestamp:", text))
+        rows.append(("Embedded SCTs", str(count)))
+    else:
+        rows.append(("Embedded SCTs", "None (transparency via OCSP or other)"))
+    if "1.3.6.1.5.5.7.1.24" in text or "OCSP Requirement" in text or "status_request" in text:
+        rows.append(("OCSP Must-Staple", "Present"))
+    else:
+        rows.append(("OCSP Must-Staple", "Not set"))
+    return rows
+
+
+def ocsp_stapling(host, port=443, timeout=10):
+    import shutil
+    import subprocess
+    if not shutil.which("openssl"):
+        return []
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-status"],
+            input="", capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return [("OCSP stapling", "Probe failed")]
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if "OCSP Response Status successful" in output or "OCSP response:" in output and "successful" in output:
+        rows = [("OCSP stapling", "Enabled (response stapled)")]
+        match = re.search(r"Cert Status:\s*(\S+)", output)
+        if match:
+            rows.append(("OCSP cert status", match.group(1)))
+        match = re.search(r"Next Update:\s*(.+)", output)
+        if match:
+            rows.append(("OCSP next update", short(match.group(1).strip(), 120)))
+        return rows
+    if "OCSP response: no response sent" in output:
+        return [("OCSP stapling", "Not enabled")]
+    return [("OCSP stapling", "No stapled response")]
+
+
+def session_reuse(host, port=443, timeout=12):
+    import shutil
+    import subprocess
+    if not shutil.which("openssl"):
+        return []
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-reconnect", "-no_shutdown"],
+            input="", capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return [("Session resumption", "Probe failed")]
+    output = (proc.stdout or "") + (proc.stderr or "")
+    reused = len(re.findall(r"Reused, [A-Z]", output))
+    fresh = len(re.findall(r"New, [A-Z]", output))
+    if reused + fresh == 0:
+        return [("Session resumption", "Unknown (parse failed)")]
+    rows = [("Session resumption", str(reused) + " reused of " + str(reused + fresh) + " handshakes")]
+    if reused:
+        rows.append(("Session verdict", "Resumption works (faster reconnects)"))
+    else:
+        rows.append(("Session verdict", "No resumption (every visit is a full handshake)"))
+    return rows
 
 
 def parse_weak_cipher_output(output):
@@ -504,6 +795,10 @@ def parse_cert(cert, der, host):
         rows.append(("Valid from", start.strftime("%Y-%m-%d %H:%M:%S UTC")))
         rows.append(("Valid until", end.strftime("%Y-%m-%d %H:%M:%S UTC")))
         rows.append(("Validity period", str((end - start).days) + " days"))
+        if (end - start).days > 398:
+            rows.append(("Lifetime compliance", "Over 398 days (browsers distrust)"))
+        else:
+            rows.append(("Lifetime compliance", "Within 398-day limit"))
         remaining = (end - now).days
         if remaining < 0:
             rows.append(("Certificate state", "Expired " + str(abs(remaining)) + " days ago"))

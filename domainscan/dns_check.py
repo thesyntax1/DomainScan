@@ -169,6 +169,270 @@ def parse_dnskey(records):
     return rows
 
 
+def soa_timer_rows(records):
+    rows = []
+    if not records:
+        return rows
+    parts = records[0].split()
+    if len(parts) < 7:
+        return rows
+    try:
+        refresh = int(parts[3])
+        retry = int(parts[4])
+        expire = int(parts[5])
+        minimum = int(parts[6])
+    except Exception:
+        return rows
+    issues = []
+    if retry >= refresh:
+        issues.append("retry should be smaller than refresh")
+    if expire < 604800:
+        issues.append("expire under 7 days risks outages")
+    if refresh < 3600:
+        issues.append("refresh under 1h causes extra load")
+    if minimum > 86400:
+        issues.append("minimum TTL over 24h slows changes")
+    if issues:
+        rows.append(("SOA timers", "Review: " + "; ".join(issues)))
+    else:
+        rows.append(("SOA timers", "Sane values"))
+    return rows
+
+
+def parse_tlsa(records):
+    rows = []
+    usages = {"0": "CA constraint", "1": "service certificate constraint", "2": "trust anchor assertion", "3": "domain-issued certificate"}
+    selectors = {"0": "full certificate", "1": "public key"}
+    matchings = {"0": "exact", "1": "SHA-256", "2": "SHA-512"}
+    for record in records or []:
+        parts = record.split()
+        if len(parts) < 4:
+            continue
+        rows.append(("TLSA usage " + parts[0], usages.get(parts[0], "unknown") + ", " + selectors.get(parts[1], parts[1]) + ", " + matchings.get(parts[2], parts[2])))
+    return rows
+
+
+def parse_sshfp(records):
+    rows = []
+    algos = {"1": "RSA", "2": "DSA", "3": "ECDSA", "4": "Ed25519", "6": "Ed448"}
+    fptypes = {"1": "SHA-1", "2": "SHA-256"}
+    for record in records or []:
+        parts = record.split()
+        if len(parts) < 3:
+            continue
+        detail = algos.get(parts[0], "algo " + parts[0]) + ", " + fptypes.get(parts[1], "type " + parts[1])
+        rows.append(("SSHFP key", detail + " (" + parts[2][:32] + "...)"))
+        if parts[1] == "1":
+            rows.append(("SSHFP warning", "SHA-1 fingerprint (weak)"))
+    return rows
+
+
+def parse_srv(records):
+    rows = []
+    for record in records or []:
+        parts = record.split()
+        if len(parts) < 4:
+            continue
+        rows.append(("SRV service", parts[3].rstrip(".") + " port " + parts[2] + " (priority " + parts[0] + ")"))
+    return rows
+
+
+def parse_naptr(records):
+    rows = []
+    for record in records or []:
+        cleaned = record.replace('"', "")
+        rows.append(("NAPTR rule", cleaned[:160]))
+    return rows
+
+
+def parse_https_svcb(https_records, svcb_records):
+    rows = []
+    for record in (https_records or []) + (svcb_records or []):
+        rows.append(("HTTPS/SVCB", describe_svcb(record)))
+    return rows
+
+
+def describe_svcb(record):
+    parts = (record or "").split()
+    if len(parts) < 2:
+        return (record or "")[:160]
+    details = []
+    if parts[0] == "0":
+        details.append("alias to " + parts[1].rstrip("."))
+    else:
+        details.append("priority " + parts[0])
+    text = " ".join(parts[2:])
+    for key in ("alpn=", "port=", "ipv4hint=", "ipv6hint=", "dohpath="):
+        if key in text:
+            value = text.split(key, 1)[1].split()[0].strip(",").strip('"')
+            details.append(key.rstrip("=") + " " + value)
+    target = parts[1].rstrip(".")
+    if target and target != ".":
+        details.append("target " + target)
+    return ", ".join(details)[:200]
+
+
+def parse_loc(records):
+    rows = []
+    for record in records or []:
+        coords = decode_loc(record)
+        if coords:
+            lat, lon = coords
+            rows.append(("LOC coordinates", str(round(lat, 5)) + ", " + str(round(lon, 5))))
+            rows.append(("LOC map", "https://www.openstreetmap.org/?mlat=" + str(lat) + "&mlon=" + str(lon) + "&zoom=14"))
+        else:
+            rows.append(("LOC record", (record or "")[:160]))
+    return rows
+
+
+def decode_loc(record):
+    import re
+    pattern = r"(\d+)\s+(?:(\d+)\s+)?(?:([\d.]+)\s+)?([NS])\s+(\d+)\s+(?:(\d+)\s+)?(?:([\d.]+)\s+)?([EW])"
+    match = re.search(pattern, record or "")
+    if not match:
+        return None
+    try:
+        lat = float(match.group(1)) + float(match.group(2) or 0) / 60 + float(match.group(3) or 0) / 3600
+        lon = float(match.group(5)) + float(match.group(6) or 0) / 60 + float(match.group(7) or 0) / 3600
+    except Exception:
+        return None
+    if match.group(4) == "S":
+        lat = -lat
+    if match.group(8) == "W":
+        lon = -lon
+    return (lat, lon)
+
+
+def ns_diversity(resolver, nameservers, zone):
+    rows = []
+    if not nameservers:
+        return rows
+    clean = sorted(set(ns.rstrip(".") for ns in nameservers))
+    rows.append(("NS count", str(len(clean))))
+    if len(clean) < 2:
+        rows.append(("NS redundancy", "Single nameserver (no redundancy)"))
+    else:
+        rows.append(("NS redundancy", "OK (" + str(len(clean)) + " servers)"))
+    subnets = {}
+    for ns in clean[:6]:
+        try:
+            result = query(resolver, ns, "A")
+            addresses = result["records"]
+        except Exception:
+            addresses = []
+        for address in addresses:
+            prefix = ".".join(address.split(".")[:3])
+            subnets.setdefault(prefix, []).append(ns)
+        if zone and (ns.lower() == zone.lower() or ns.lower().endswith("." + zone.lower())) and not addresses:
+            rows.append(("NS glue: " + ns, "In-bailiwick but no A record (missing glue)"))
+    if subnets:
+        rows.append(("NS subnets", str(len(subnets)) + " distinct /24 networks"))
+        if len(subnets) == 1 and len(clean) > 1:
+            rows.append(("NS diversity", "All nameservers share one /24 (single point of failure)"))
+    return rows
+
+
+def recursion_rows(resolver, nameservers):
+    rows = []
+    if not nameservers:
+        return rows
+    tested = 0
+    for ns in sorted(set(nameservers))[:3]:
+        target = ns.rstrip(".")
+        try:
+            result = query(resolver, target, "A")
+            addresses = result["records"]
+        except Exception:
+            addresses = []
+        if not addresses:
+            continue
+        tested += 1
+        if is_recursive(addresses[0]):
+            rows.append(("Recursion " + target, "Open resolver (answers for other zones)"))
+        else:
+            rows.append(("Recursion " + target, "Closed (authoritative only)"))
+    if not tested:
+        rows.append(("Recursion test", "No nameserver addresses to test"))
+    return rows
+
+
+def is_recursive(ns_ip):
+    try:
+        import dns.resolver
+        custom = dns.resolver.Resolver(configure=False)
+        custom.nameservers = [ns_ip]
+        custom.timeout = 3.0
+        custom.lifetime = 5.0
+        answer = custom.resolve("example.net", "A")
+        return len(list(answer)) > 0
+    except Exception:
+        return False
+
+
+def doh_compare(host, system_a, rows):
+    try:
+        answers = doh_query(host, "A")
+    except Exception:
+        rows.append(("DNS-over-HTTPS", "DoH query failed"))
+        return []
+    if not answers:
+        rows.append(("DNS-over-HTTPS", "No answer via Cloudflare DoH"))
+        return []
+    rows.append(("A via DoH", ", ".join(sorted(answers))))
+    local = set(system_a or [])
+    if local and set(answers) == local:
+        rows.append(("DoH agreement", "DoH answer matches local resolver"))
+    elif local:
+        rows.append(("DoH agreement", "DoH answer differs (CDN or geo-DNS likely)"))
+    return answers
+
+
+def doh_query(name, rtype, timeout=8):
+    import requests
+    from domainscan.helpers import BROWSER_UA
+    url = "https://cloudflare-dns.com/dns-query"
+    params = {"name": name, "type": rtype}
+    headers = {"User-Agent": BROWSER_UA, "Accept": "application/dns-json"}
+    response = requests.get(url, params=params, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    found = []
+    for item in data.get("Answer", []) or []:
+        if str(item.get("type", "")) in ("1", "28") or rtype in ("A", "AAAA"):
+            value = str(item.get("data", "")).strip()
+            if value and value not in found:
+                found.append(value)
+    return found
+
+
+def adbit_rows(name):
+    rows = []
+    for ip, label in (("8.8.8.8", "Google"), ("1.1.1.1", "Cloudflare")):
+        state = adbit_query(ip, name)
+        if state is None:
+            rows.append(("DNSSEC validation (" + label + ")", "Query failed"))
+        elif state:
+            rows.append(("DNSSEC validation (" + label + ")", "AD flag set (signature validates)"))
+        else:
+            rows.append(("DNSSEC validation (" + label + ")", "No AD flag (unsigned or bogus)"))
+    return rows
+
+
+def adbit_query(ip, name):
+    try:
+        import dns.flags
+        import dns.resolver
+        custom = dns.resolver.Resolver(configure=False)
+        custom.nameservers = [ip]
+        custom.timeout = 3.0
+        custom.lifetime = 5.0
+        answer = custom.resolve(name, "DS")
+        list(answer)
+        return bool(answer.response.flags & dns.flags.AD)
+    except Exception:
+        return None
+
+
 def compare_resolvers(host, system_a):
     rows = []
     system_set = set(system_a or [])
@@ -249,6 +513,8 @@ def collect(host, apex):
         "mx": [], "mx_apex": [], "ns": [], "ns_apex": [],
         "txt": [], "txt_apex": [], "soa": [], "soa_apex": [],
         "caa": [], "caa_apex": [], "ds": [], "dnskey": [],
+        "srv": [], "tlsa": [], "sshfp": [], "naptr": [],
+        "https": [], "svcb": [], "loc": [], "doh": [],
     }
     if not HAS_DNSPYTHON:
         return collect_fallback(host, rows, data)
@@ -279,24 +545,41 @@ def collect(host, apex):
         data["ds"] = query_type(resolver, host, "DS", rows, "")
         data["dnskey"] = query_type(resolver, host, "DNSKEY", rows, "")
     for service in ("_https._tcp", "_http._tcp"):
-        query_type(resolver, service + "." + host, "SRV", rows, " (" + service + ")")
+        found = query_type(resolver, service + "." + host, "SRV", rows, " (" + service + ")")
+        if found:
+            data["srv"].extend(found)
     for rtype in EXTRA_HOST_TYPES:
-        query_type(resolver, host, rtype, rows, "")
-    query_type(resolver, "_443._tcp." + host, "TLSA", rows, " (_443._tcp)")
+        found = query_type(resolver, host, rtype, rows, "")
+        if found:
+            data[rtype.lower()].extend(found)
+    tlsa_found = query_type(resolver, "_443._tcp." + host, "TLSA", rows, " (_443._tcp)")
+    if tlsa_found:
+        data["tlsa"].extend(tlsa_found)
     if apex and apex != host:
         query_type(resolver, apex, "NSEC3PARAM", rows, " (apex)")
     else:
         query_type(resolver, host, "NSEC3PARAM", rows, "")
     rows.extend(parse_soa(data["soa_apex"] or data["soa"]))
+    rows.extend(soa_timer_rows(data["soa_apex"] or data["soa"]))
     rows.extend(parse_caa(data["caa_apex"] or data["caa"]))
     rows.extend(parse_ds(data["ds"]))
     rows.extend(parse_dnskey(data["dnskey"]))
+    rows.extend(parse_tlsa(data["tlsa"]))
+    rows.extend(parse_sshfp(data["sshfp"]))
+    rows.extend(parse_srv(data["srv"]))
+    rows.extend(parse_naptr(data["naptr"]))
+    rows.extend(parse_https_svcb(data["https"], data["svcb"]))
+    rows.extend(parse_loc(data["loc"]))
     rows.extend(compare_resolvers(host, data["a"]))
+    data["doh"] = doh_compare(host, data["a"], rows)
+    rows.extend(adbit_rows(apex or host))
     if apex:
         zone = apex
     else:
         zone = host
     rows.extend(check_axfr(resolver, data["ns_apex"] or data["ns"], zone))
+    rows.extend(ns_diversity(resolver, data["ns_apex"] or data["ns"], zone))
+    rows.extend(recursion_rows(resolver, data["ns_apex"] or data["ns"]))
     if data["ds"] or data["dnskey"]:
         rows.append(("DNSSEC", "Signed (DS/DNSKEY records published)"))
     else:

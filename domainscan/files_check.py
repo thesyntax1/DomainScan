@@ -1,6 +1,7 @@
 import re
 import json
 import hashlib
+import urllib.parse
 
 from domainscan.helpers import BROWSER_UA, favicon_hash, short
 
@@ -30,29 +31,20 @@ def collect(base_url, timeout=10):
     if not security["ok"]:
         fallback = fetch(session, base_url + "/security.txt", timeout)
         if fallback["ok"]:
-            rows.extend(parse_security(fallback, "security.txt (root)"))
+            rows.extend(parse_security(fallback, "security.txt (root)", base_url))
         else:
-            rows.extend(parse_security(security))
+            rows.extend(parse_security(security, "security.txt", base_url))
     else:
-        rows.extend(parse_security(security))
+        rows.extend(parse_security(security, "security.txt", base_url))
     ads = fetch(session, base_url + "/ads.txt", timeout)
-    if ads["ok"]:
-        lines = [line.strip() for line in ads["text"].splitlines() if line.strip()]
-        rows.append(("ads.txt", "Present (" + str(len(lines)) + " entries)"))
-    else:
-        rows.append(("ads.txt", describe_missing(ads)))
+    rows.extend(parse_ads(ads))
     humans = fetch(session, base_url + "/humans.txt", timeout)
     if humans["ok"]:
         rows.append(("humans.txt", "Present (" + str(humans["size"]) + " bytes)"))
     else:
         rows.append(("humans.txt", describe_missing(humans)))
     crossdomain = fetch(session, base_url + "/crossdomain.xml", timeout)
-    if crossdomain["ok"]:
-        rows.append(("crossdomain.xml", "Present (" + str(crossdomain["size"]) + " bytes)"))
-        if "*" in crossdomain["text"]:
-            rows.append(("crossdomain.xml policy", "Wildcard found (review manually)"))
-    else:
-        rows.append(("crossdomain.xml", describe_missing(crossdomain)))
+    rows.extend(parse_crossdomain(crossdomain))
     clientaccess = fetch(session, base_url + "/clientaccesspolicy.xml", timeout)
     if clientaccess["ok"]:
         rows.append(("clientaccesspolicy.xml", "Present (" + str(clientaccess["size"]) + " bytes)"))
@@ -69,7 +61,140 @@ def collect(base_url, timeout=10):
     else:
         rows.append(("Favicon", describe_missing(favicon)))
     rows.extend(find_manifest(session, base_url, timeout))
+    rows.extend(well_known_rows(session, base_url, timeout))
+    rows.extend(cms_version_rows(session, base_url, timeout))
     return {"rows": rows}
+
+
+def parse_ads(result):
+    rows = []
+    if not result["ok"]:
+        rows.append(("ads.txt", describe_missing(result)))
+        return rows
+    entries = []
+    variables = []
+    for line in result["text"].splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line and "," not in line.split("=", 1)[0]:
+            variables.append(line)
+        else:
+            entries.append(line)
+    rows.append(("ads.txt", "Present (" + str(len(entries)) + " entries, " + str(len(variables)) + " variables)"))
+    direct = sum(1 for line in entries if ", DIRECT" in line.upper())
+    reseller = sum(1 for line in entries if ", RESELLER" in line.upper())
+    rows.append(("ads.txt relationships", str(direct) + " DIRECT, " + str(reseller) + " RESELLER"))
+    sellers = set()
+    for line in entries[:50]:
+        bits = [bit.strip() for bit in line.split(",")]
+        if bits:
+            sellers.add(bits[0].lower())
+    if sellers:
+        rows.append(("ads.txt sellers", str(len(sellers)) + " distinct systems"))
+    for line in variables[:4]:
+        rows.append(("ads.txt variable", short(line, 160)))
+    return rows
+
+
+def parse_crossdomain(result):
+    rows = []
+    if not result["ok"]:
+        rows.append(("crossdomain.xml", describe_missing(result)))
+        return rows
+    rows.append(("crossdomain.xml", "Present (" + str(result["size"]) + " bytes)"))
+    domains = re.findall(r'domain="([^"]+)"', result["text"] or "")
+    if domains:
+        rows.append(("crossdomain.xml domains", short(", ".join(domains[:8]), 200)))
+    if "*" in domains:
+        rows.append(("crossdomain.xml policy", "Wildcard allows any Flash client (risky)"))
+    if 'secure="false"' in (result["text"] or ""):
+        rows.append(("crossdomain.xml transport", "secure=false allows plain HTTP (risky)"))
+    return rows
+
+
+WELL_KNOWN = [
+    "/.well-known/assetlinks.json",
+    "/.well-known/apple-app-site-association",
+    "/.well-known/openid-configuration",
+    "/.well-known/host-meta",
+    "/.well-known/dnt-policy.txt",
+    "/.well-known/ai-plugin.json",
+    "/.well-known/change-password",
+]
+
+
+def well_known_rows(session, base_url, timeout):
+    rows = []
+    found = 0
+    for path in WELL_KNOWN:
+        result = fetch(session, base_url + path, timeout)
+        if not result["ok"]:
+            continue
+        found += 1
+        rows.append((path, "Present (" + str(result["size"]) + " bytes)"))
+        if path.endswith("openid-configuration"):
+            rows.extend(parse_openid_config(result["text"]))
+    if not found:
+        rows.append(("Well-known files", "None of " + str(len(WELL_KNOWN)) + " probed files found"))
+    return rows
+
+
+def parse_openid_config(text):
+    rows = []
+    try:
+        data = json.loads(text or "")
+    except Exception:
+        rows.append(("OpenID config", "Invalid JSON"))
+        return rows
+    if data.get("issuer"):
+        rows.append(("OpenID issuer", short(data["issuer"], 200)))
+    if data.get("authorization_endpoint"):
+        rows.append(("OpenID auth", "Endpoint published"))
+    grants = data.get("grant_types_supported", []) or []
+    if grants:
+        rows.append(("OpenID grants", short(", ".join(grants[:6]), 160)))
+    return rows
+
+
+def cms_version_rows(session, base_url, timeout):
+    rows = []
+    readme = fetch(session, base_url + "/readme.html", timeout)
+    if readme["ok"]:
+        version = parse_wp_readme(readme["text"])
+        if version:
+            rows.append(("WordPress version", version + " (readme.html exposed)"))
+        else:
+            rows.append(("WordPress readme", "Present but version not parsed"))
+    changelog = fetch(session, base_url + "/CHANGELOG.txt", timeout)
+    if changelog["ok"]:
+        version = parse_drupal_changelog(changelog["text"])
+        if version:
+            rows.append(("Drupal version", version + " (CHANGELOG.txt exposed)"))
+        else:
+            rows.append(("Drupal changelog", "Present but version not parsed"))
+    if not readme["ok"] and not changelog["ok"]:
+        rows.append(("CMS version files", "readme.html and CHANGELOG.txt not exposed"))
+    return rows
+
+
+def parse_wp_readme(text):
+    match = re.search(r"Version\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)", text or "")
+    if match:
+        return match.group(1)
+    match = re.search(r"WordPress\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)", text or "")
+    if match:
+        return match.group(1)
+    return ""
+
+
+def parse_drupal_changelog(text):
+    first = (text or "").splitlines()
+    if first:
+        match = re.search(r"Drupal\s+([0-9]+\.[0-9]+(?:\.[0-9a-z.-]+)?)", first[0], re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def fetch(session, url, timeout, text=True):
@@ -132,7 +257,31 @@ def parse_robots(result):
         rows.append(("robots.txt disallow " + str(index), short(value, 160)))
     for index, target in enumerate(sitemaps[:5], 1):
         rows.append(("robots.txt sitemap " + str(index), short(target, 200)))
+    delays = [line for line in rules if line.lower().startswith("crawl-delay:")]
+    for line in delays[:3]:
+        rows.append(("robots.txt crawl-delay", line.split(":", 1)[1].strip() + "s"))
+    empties = [line for line in disallows if not line.split(":", 1)[1].strip()]
+    if empties:
+        rows.append(("robots.txt empty disallow", "Present (allows all crawling)"))
+    interesting = find_interesting_disallows(disallows)
+    if interesting:
+        rows.append(("robots.txt sensitive paths", str(len(interesting)) + " (attackers read this too)"))
+        for index, value in enumerate(interesting[:8], 1):
+            rows.append(("robots.txt sensitive " + str(index), short(value, 160)))
     return {"rows": rows, "sitemaps": sitemaps}
+
+
+def find_interesting_disallows(disallows):
+    keywords = ("admin", "login", "wp-", "private", "backup", "config", "api", "internal", "test", "dev", "tmp", "cgi-bin", "phpmyadmin", "server-status")
+    found = []
+    for line in disallows:
+        if ":" in line:
+            value = line.split(":", 1)[1].strip()
+        else:
+            value = line
+        if any(keyword in value.lower() for keyword in keywords) and value not in found:
+            found.append(value)
+    return found
 
 
 def parse_sitemap(result, label="sitemap.xml"):
@@ -150,21 +299,53 @@ def parse_sitemap(result, label="sitemap.xml"):
     rows.append(("Sitemap URL count", str(len(locations))))
     for index, target in enumerate(locations[:5], 1):
         rows.append(("Sitemap URL " + str(index), short(target, 200)))
+    stamps = re.findall(r"<lastmod>(.*?)</lastmod>", result["text"], re.IGNORECASE | re.DOTALL)
+    stamps = sorted(item.strip() for item in stamps if item.strip())
+    if stamps:
+        rows.append(("Sitemap lastmod", str(len(stamps)) + " dated, oldest " + stamps[0][:10] + ", newest " + stamps[-1][:10]))
     return rows
 
 
-def parse_security(result, label="security.txt"):
+def parse_security(result, label="security.txt", base_url=""):
     rows = []
     if not result["ok"]:
         rows.append((label, describe_missing(result)))
         return rows
     rows.append((label, "Present (" + str(result["size"]) + " bytes)"))
     fields = ["Contact", "Expires", "Encryption", "Acknowledgments", "Preferred-Languages", "Canonical", "Hiring", "Policy"]
+    values = {}
     for field in fields:
         match = re.search(r"^" + field + r":\s*(.+)$", result["text"], re.IGNORECASE | re.MULTILINE)
         if match:
-            rows.append(("security.txt " + field, short(match.group(1).strip(), 200)))
+            values[field] = match.group(1).strip()
+            rows.append(("security.txt " + field, short(values[field], 200)))
+    if "Expires" in values:
+        rows.append(("security.txt expiry", security_expiry(values["Expires"])))
+    else:
+        rows.append(("security.txt expiry", "Expires field missing (required by RFC 9116)"))
+    if "Contact" not in values:
+        rows.append(("security.txt contact", "Contact field missing (required by RFC 9116)"))
+    if "Canonical" in values and base_url:
+        host = urllib.parse.urlsplit(base_url).hostname or ""
+        if host and host not in values["Canonical"]:
+            rows.append(("security.txt canonical", "Points to another host (review)"))
+    if not result["content_type"].lower().startswith("text/plain"):
+        rows.append(("security.txt type", "Served as " + short(result["content_type"], 80) + " (should be text/plain)"))
     return rows
+
+
+def security_expiry(value):
+    import datetime
+    try:
+        moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return "Unparseable date"
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    if moment < now:
+        return "Expired (update required)"
+    return "Valid until " + value[:10]
 
 
 def find_manifest(session, base_url, timeout):

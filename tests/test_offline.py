@@ -11,12 +11,13 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import bgp_check, content_check, crawl_check, cross_check, dns_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, ports_check, profiles, rdap_check, reputation_check, subdomain_check, web_extra_check, whois_check
+from domainscan import a11y_check, bgp_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, typo_check, wayback_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -350,7 +351,7 @@ class LocalServerTest(unittest.TestCase):
         self.assertEqual(data["Sitemap URL count"], "2")
         self.assertEqual(data["Sitemap URL 1"], "http://localhost/page1")
         self.assertEqual(data["security.txt Contact"], "mailto:security@example.com")
-        self.assertEqual(data["ads.txt"], "Present (1 entries)")
+        self.assertEqual(data["ads.txt"], "Present (1 entries, 0 variables)")
         self.assertIn("Present", data["Favicon"])
         self.assertEqual(data["Manifest app name"], "Test App")
         self.assertEqual(data["Manifest icons"], "1")
@@ -715,7 +716,7 @@ class ReputationParseTest(unittest.TestCase):
         self.assertIn("Listed", data["93.184.216.34 on Spamhaus ZEN"])
         self.assertIn("XBL", data["93.184.216.34 on Spamhaus ZEN"])
         self.assertEqual(data["93.184.216.34 on SpamCop"], "Clean")
-        self.assertEqual(data["DNSBL listings"], "1 of 4 checks")
+        self.assertEqual(data["DNSBL listings"], "1 of 7 checks")
 
 
 class BgpParseTest(unittest.TestCase):
@@ -1382,3 +1383,523 @@ class AccuracyPatchTests(unittest.TestCase):
         info2 = helpers.parse_target("example.com")
         rows2 = helpers.describe_target(info2)
         self.assertTrue(any(key == "IDN check" for key, value in rows2))
+
+
+class SeoAuditTests(unittest.TestCase):
+    def test_title_verdicts(self):
+        from bs4 import BeautifulSoup
+        short_soup = BeautifulSoup("<html><head><title>Hi</title></head></html>", "html.parser")
+        self.assertIn("Short", rows_to_dict(seo_check.title_rows(short_soup))["Title verdict"])
+        long_soup = BeautifulSoup("<html><head><title>" + "x" * 70 + "</title></head></html>", "html.parser")
+        self.assertIn("Long", rows_to_dict(seo_check.title_rows(long_soup))["Title verdict"])
+        good_soup = BeautifulSoup("<html><head><title>" + "x" * 45 + "</title></head></html>", "html.parser")
+        self.assertEqual(rows_to_dict(seo_check.title_rows(good_soup))["Title verdict"], "Good length")
+
+    def test_meta_robots_noindex(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><meta name="robots" content="noindex, nofollow"></head></html>', "html.parser")
+        data = rows_to_dict(seo_check.meta_rows(soup))
+        self.assertIn("noindex", data["Indexing"])
+
+    def test_hreflang_default(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><link rel="alternate" hreflang="en" href="https://example.com/en"><link rel="alternate" hreflang="x-default" href="https://example.com/"></head></html>', "html.parser")
+        data = rows_to_dict(seo_check.hreflang_rows(soup, 1))
+        self.assertEqual(data["Hreflang tags"], "2")
+        self.assertIn("present", data["Hreflang default"])
+
+    def test_social_tags_missing(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup("<html><head></head></html>", "html.parser")
+        data = rows_to_dict(seo_check.social_tag_rows(soup, 1))
+        self.assertEqual(data["Open Graph tags"], "0 of 5")
+        self.assertEqual(data["Twitter card"], "Missing")
+
+    def test_heading_order(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup("<html><body><h1>Title</h1><h3>Skip</h3></body></html>", "html.parser")
+        data = rows_to_dict(seo_check.heading_rows(soup))
+        self.assertIn("skipped", data["Heading order"])
+        self.assertEqual(data["H1 text"], "Title")
+
+
+class A11yTests(unittest.TestCase):
+    def test_missing_lang_and_alt(self):
+        html = '<html><head><title>T</title></head><body><img src="a.png"><img src="b.png" alt=""></body></html>'
+        data = rows_to_dict(a11y_check.collect(html)["rows"])
+        self.assertIn("Missing", data["Page language"])
+        self.assertEqual(data["Images without alt"], "1")
+        self.assertEqual(data["Images with empty alt"], "1 (fine if decorative)")
+
+    def test_unlabeled_fields(self):
+        html = '<html><body><form><input type="text" name="q"><input type="text" aria-label="Search"></form></body></html>'
+        data = rows_to_dict(a11y_check.collect(html)["rows"])
+        self.assertEqual(data["Unlabeled fields"], "1")
+
+    def test_empty_buttons_and_links(self):
+        html = '<html><body><button></button><button aria-label="x"></button><a href="/x">click here</a></body></html>'
+        data = rows_to_dict(a11y_check.collect(html)["rows"])
+        self.assertEqual(data["Empty buttons"], "1")
+        self.assertEqual(data["Generic link texts"], "1")
+
+    def test_score_clean_page(self):
+        html = '<html lang="en"><head><title>T</title></head><body><header></header><nav></nav><main><h1>T</h1><img src="a.png" alt="a"><a href="#main">Skip to content</a></main><footer></footer></body></html>'
+        data = rows_to_dict(a11y_check.collect(html)["rows"])
+        self.assertTrue(data["Accessibility score"].startswith("100/100"))
+
+
+class PerfTests(unittest.TestCase):
+    def test_verdicts_and_bytes(self):
+        self.assertEqual(perf_check.verdict_ms(100, 800, 1800), "Good")
+        self.assertEqual(perf_check.verdict_ms(900, 800, 1800), "Needs improvement")
+        self.assertEqual(perf_check.verdict_ms(2000, 800, 1800), "Poor")
+        self.assertEqual(perf_check.format_bytes(1536), "1.5 KB")
+        self.assertEqual(perf_check.format_bytes(500), "500 bytes")
+
+    def test_blocking_and_images(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><script src="a.js"></script><script src="b.js" defer></script><link rel="stylesheet" href="x.css"></head><body><img src="1.png" loading="lazy"><img src="2.png" width="1" height="1"></body></html>', "html.parser")
+        data = rows_to_dict(perf_check.blocking_rows(soup))
+        self.assertEqual(data["Blocking scripts in head"], "1")
+        self.assertEqual(data["Deferred scripts in head"], "1")
+        data = rows_to_dict(perf_check.image_perf_rows(soup))
+        self.assertEqual(data["Lazy-loaded images"], "1 of 2")
+        self.assertEqual(data["Images with dimensions"], "1 of 2 (prevents layout shift)")
+
+
+class PrivacyTests(unittest.TestCase):
+    def test_tracker_match(self):
+        self.assertEqual(privacy_check.match_trackers({"www.google-analytics.com", "cdn.example.com"}), {"www.google-analytics.com": "Google Analytics"})
+
+    def test_referrer_and_consent(self):
+        data = rows_to_dict(privacy_check.referrer_rows({}))
+        self.assertIn("Not set", data["Referrer-Policy"])
+        data = rows_to_dict(privacy_check.consent_rows("<html>onetrust cookie consent</html>"))
+        self.assertIn("Likely present", data["Consent banner"])
+
+    def test_fingerprint_markers(self):
+        html = '<script>var c = x.getContext("2d"); c.toDataURL(); new RTCPeerConnection();</script>'
+        data = rows_to_dict(privacy_check.fingerprint_rows(html))
+        self.assertEqual(data["Fingerprinting markers"], "2")
+
+
+class WaybackParseTests(unittest.TestCase):
+    def test_summarize(self):
+        captures = [
+            ["20200101120000", "http://example.com/", "200", "text/html", "A"],
+            ["20210601120000", "http://example.com/admin/", "200", "text/html", "B"],
+            ["20230601120000", "http://example.com/app.js", "200", "application/javascript", "C"],
+        ]
+        data = rows_to_dict(wayback_check.summarize(captures))
+        self.assertEqual(data["Archived URLs"], "3 unique URLs")
+        self.assertEqual(data["First capture"], "2020-01-01 12:00")
+        self.assertIn("2023", data["Latest capture"])
+        self.assertIn("admin", data["Archived path 1"])
+
+    def test_stamp_helpers(self):
+        self.assertEqual(wayback_check.format_stamp("20200101120000"), "2020-01-01 12:00")
+        self.assertEqual(wayback_check.span_years("20200101120000", "20230101120000"), "About 3 years")
+
+
+class CrtshParseTests(unittest.TestCase):
+    def test_summarize(self):
+        entries = [
+            {"issuer_name": "CN=R3,O=Let's Encrypt,C=US", "not_before": "2023-01-01T00:00:00", "not_after": "2030-01-01T00:00:00", "name_value": "example.com\nwww.example.com"},
+            {"issuer_name": "CN=R3,O=Let's Encrypt,C=US", "not_before": "2020-01-01T00:00:00", "not_after": "2020-04-01T00:00:00", "name_value": "*.example.com"},
+        ]
+        data = rows_to_dict(crtsh_check.summarize(entries, "example.com"))
+        self.assertEqual(data["Certificates found"], "2 in CT logs")
+        self.assertEqual(data["Distinct issuers"], "1")
+        self.assertEqual(data["Expired certificates"], "1 of 2")
+        self.assertIn("*.example.com", data["Wildcard certificates"])
+
+    def test_issuer_and_precert(self):
+        self.assertEqual(crtsh_check.parse_issuer("CN=R3,O=Let's Encrypt,C=US"), "R3")
+        self.assertTrue(crtsh_check.is_precert({"extensions": "CT Poison"}))
+        self.assertFalse(crtsh_check.is_precert({"extensions": "basicConstraints"}))
+
+
+class TypoTests(unittest.TestCase):
+    def test_variants(self):
+        variants = typo_check.generate_variants("example.com")
+        self.assertLessEqual(len(variants), 40)
+        self.assertIn("exaple.com", variants)
+        self.assertIn("example.net", variants)
+        self.assertNotIn("example.com", variants)
+
+    def test_probe_with_fake_dns(self):
+        from unittest.mock import patch
+        def fake_query(resolver, name, rtype):
+            if name == "exaple.com":
+                return {"records": ["9.9.9.9"]}
+            return {"records": []}
+        with patch("domainscan.dns_check.query", side_effect=fake_query):
+            hits = typo_check.probe_variants(None, ["exaple.com", "examplle.com"])
+        self.assertEqual(hits, [("exaple.com", ["9.9.9.9"])])
+
+
+class ExposureTests(unittest.TestCase):
+    def test_verdicts(self):
+        class FakeResponse:
+            def __init__(self, status, text):
+                self.status_code = status
+                self.text = text
+                self.content = text.encode()
+        exposed = exposure_check.verdict("/.git/config", "[core]", "critical", FakeResponse(200, "[core]\nrepo"))
+        self.assertEqual(exposed[1], "exposed")
+        clean = exposure_check.verdict("/.git/config", "[core]", "critical", FakeResponse(200, "<html>home</html>"))
+        self.assertIsNone(clean)
+        guarded = exposure_check.verdict("/console/", None, "medium", FakeResponse(401, "login"))
+        self.assertEqual(guarded[1], "guarded")
+        self.assertLess(exposure_check.rank("critical"), exposure_check.rank("high"))
+
+
+class HttpDeepTests(unittest.TestCase):
+    def test_csp_parse(self):
+        data = rows_to_dict(http_check.parse_csp("default-src 'self'; script-src 'self' 'unsafe-inline' *; report-uri /csp"))
+        self.assertEqual(data["CSP directives"], "3")
+        self.assertIn("unsafe-inline", data["CSP weaknesses"])
+        self.assertEqual(data["CSP reporting"], "Configured")
+
+    def test_permissions_link_timing(self):
+        data = rows_to_dict(http_check.parse_permissions_policy("camera=(), geolocation=(self)"))
+        self.assertEqual(data["Permissions features"], "2")
+        self.assertEqual(data["Permissions disabled"], "camera")
+        data = rows_to_dict(http_check.parse_link_header('</a.js>; rel=preload; as=script, </b>; rel=preconnect'))
+        self.assertEqual(data["Link headers"], "2")
+        self.assertIn("1 (", data["Link preload"])
+        data = rows_to_dict(http_check.parse_server_timing("db;dur=53, cache;desc=hit"))
+        self.assertIn("db=53ms", data["Server-Timing"])
+
+    def test_x_header_inventory(self):
+        data = rows_to_dict(http_check.x_header_inventory({"X-Custom": "1", "Content-Type": "x", "X-Frame-Options": "DENY"}))
+        self.assertIn("X-Custom", data["Custom X- headers"])
+
+    def test_cookie_prefixes(self):
+        ok = http_check.cookie_prefix_rows(["__Host-id=1; Path=/; Secure"])
+        self.assertIn("Valid", ok[0][1])
+        bad = http_check.cookie_prefix_rows(["__Host-id=1; Path=/", "__Secure-x=1; Path=/", "a=1; SameSite=None"])
+        joined = " ".join(value for _, value in bad)
+        self.assertIn("Rejected", joined)
+
+    def test_openssl_text_parse(self):
+        sample = "Signature Algorithm: sha256WithRSAEncryption\nPublic-Key: (2048 bit)\nX509v3 Extended Key Usage: \nTLS Web Server Authentication\nCT Precertificate SCTs: \nSigned Certificate Timestamp:\nSigned Certificate Timestamp:\n"
+        data = rows_to_dict(http_check.parse_openssl_text(sample))
+        self.assertEqual(data["Signature algorithm"], "sha256WithRSAEncryption")
+        self.assertEqual(data["Public key size"], "2048 bits")
+        self.assertEqual(data["Embedded SCTs"], "2")
+        self.assertEqual(data["OCSP Must-Staple"], "Not set")
+
+    def test_http_version(self):
+        class FakeRaw:
+            version = 20
+        class FakeResponse:
+            raw = FakeRaw()
+        self.assertEqual(http_check.http_version(FakeResponse()), "HTTP/2")
+
+
+class DnsDeepTests(unittest.TestCase):
+    def test_tlsa_sshfp_srv(self):
+        data = rows_to_dict(dns_check.parse_tlsa(["3 1 1 AABBCCDDEE"]))
+        self.assertIn("SHA-256", data["TLSA usage 3"])
+        data = rows_to_dict(dns_check.parse_sshfp(["4 2 AABBCCDDEE"]))
+        self.assertIn("Ed25519", data["SSHFP key"])
+        data = rows_to_dict(dns_check.parse_srv(["0 5 443 example.com."]))
+        self.assertIn("port 443", data["SRV service"])
+
+    def test_svcb_and_loc(self):
+        self.assertIn("priority 1", dns_check.describe_svcb('1 . alpn="h2" port="443"'))
+        self.assertIn("alias to", dns_check.describe_svcb("0 pool.example.com."))
+        coords = dns_check.decode_loc("51 30 0 N 0 7 0 W 10m")
+        self.assertAlmostEqual(coords[0], 51.5)
+        self.assertAlmostEqual(coords[1], -0.1166, places=3)
+        self.assertIsNone(dns_check.decode_loc("not a loc record"))
+
+    def test_soa_timers(self):
+        data = rows_to_dict(dns_check.soa_timer_rows(["ns1 a 1 86400 7200 1209600 3600"]))
+        self.assertEqual(data["SOA timers"], "Sane values")
+        data = rows_to_dict(dns_check.soa_timer_rows(["ns1 a 1 100 200 1000 99999"]))
+        self.assertIn("retry", data["SOA timers"])
+
+    def test_ns_diversity(self):
+        from unittest.mock import patch
+        def fake_query(resolver, name, rtype):
+            return {"records": ["192.0.2.1"] if "ns1" in name else ["192.0.2.2"]}
+        with patch("domainscan.dns_check.query", side_effect=fake_query):
+            data = rows_to_dict(dns_check.ns_diversity(None, ["ns1.example.com", "ns2.example.com"], "example.com"))
+        self.assertEqual(data["NS count"], "2")
+        self.assertIn("single point", data["NS diversity"].lower() + data.get("NS subnets", ""))
+
+
+class MailDeepTests(unittest.TestCase):
+    def test_parse_ehlo(self):
+        greeting = "250-mail.example ESMTP\r\n250-STARTTLS\r\n250-AUTH PLAIN LOGIN\r\n250 SIZE 10485760\r\n"
+        extensions = mail_check.parse_ehlo(greeting)
+        self.assertIn("STARTTLS", extensions)
+        self.assertIn("AUTH PLAIN LOGIN", extensions)
+
+    def test_private_ip(self):
+        self.assertTrue(mail_check.is_private_ip("10.0.0.5"))
+        self.assertTrue(mail_check.is_private_ip("172.20.1.1"))
+        self.assertFalse(mail_check.is_private_ip("8.8.8.8"))
+        self.assertFalse(mail_check.is_private_ip("not-an-ip"))
+
+    def test_mx_health_dup_prefs(self):
+        rows = mail_check.mx_health([("10", "mx1.example.com"), ("10", "mx2.example.com")], None)
+        self.assertIn("Duplicate", rows[0][1])
+
+    def test_dmarc_external_auth(self):
+        from unittest.mock import patch
+        with patch("domainscan.dns_check.query", return_value={"records": []}):
+            rows = mail_check.dmarc_external_auth(None, "example.com", "mailto:reports@example.com,mailto:x@external.net")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Missing authorization", rows[0][1])
+
+    def test_bimi_logo_rows(self):
+        self.assertEqual(mail_check.bimi_logo_rows("v=BIMI1"), [])
+        rows = mail_check.bimi_logo_rows("v=BIMI1; l=http://example.com/logo.svg")
+        self.assertIn("Not HTTPS", rows[1][1])
+
+
+class ContentDeepTests(unittest.TestCase):
+    def test_sri_and_jquery(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><head><script src="a.js" integrity="sha384-x"></script><script src="b.js"></script></head></html>', "html.parser")
+        data = rows_to_dict(content_check.sri_rows(soup))
+        self.assertEqual(data["Scripts with integrity"], "1 of 2")
+        self.assertIn("1 scripts lack", data["SRI gap (JS)"])
+        jquery_soup = BeautifulSoup('<html><head><script src="jquery-2.2.4.min.js"></script></head></html>', "html.parser")
+        data = rows_to_dict(content_check.jquery_rows(jquery_soup, "/*! jQuery JavaScript Library v2.2.4 */"))
+        self.assertEqual(data["jQuery version"], "2.2.4")
+        self.assertIn("end-of-life", data["jQuery verdict"])
+
+    def test_form_security(self):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup('<html><body><form action="http://evil.example/" method="get"><input type="password" name="p"><input type="file" name="f"></form></body></html>', "html.parser")
+        data = rows_to_dict(content_check.form_security_rows(soup.find_all("form"), "https://example.com/"))
+        self.assertIn("credentials in URL", data["Password over GET"])
+        self.assertEqual(data["File upload forms"], "1")
+        self.assertEqual(data["Forms to plain HTTP"], "1")
+
+    def test_traces_dom_pwa(self):
+        data = rows_to_dict(content_check.trace_rows("<html>Fatal error: oops ORA-1234</html>"))
+        self.assertIn("PHP fatal error", data["Error disclosure"])
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup("<html><body><div><p>x</p></div></body></html>", "html.parser")
+        data = rows_to_dict(content_check.dom_rows(soup))
+        self.assertEqual(data["DOM elements"], "4")
+        data = rows_to_dict(content_check.pwa_rows(soup, "navigator.serviceWorker.register()"))
+        self.assertIn("Registration code", data["Service worker"])
+
+    def test_new_markers(self):
+        html = '<html><div x-data="{}">htmx tailwind <script src="https://unpkg.com/alpinejs"></script></html>'
+        found = dict(content_check.detect_tech(html, {}, [], {}))
+        self.assertIn("Tech: Alpine.js", found)
+        self.assertIn("Tech: htmx", found)
+        self.assertIn("Tech: Tailwind CSS", found)
+
+
+class FilesDeepTests(unittest.TestCase):
+    def test_interesting_disallows(self):
+        found = files_check.find_interesting_disallows(["Disallow: /admin/", "Disallow: /images/"])
+        self.assertEqual(found, ["/admin/"])
+
+    def test_security_expiry(self):
+        self.assertIn("Valid", files_check.security_expiry("2999-01-01T00:00:00Z"))
+        self.assertIn("Expired", files_check.security_expiry("2000-01-01T00:00:00Z"))
+        self.assertIn("Unparseable", files_check.security_expiry("tomorrow"))
+
+    def test_parse_ads(self):
+        result = {"ok": True, "text": "google.com, pub-1, DIRECT\nopenx.com, 111, RESELLER\nCONTACT=ads@example.com\n"}
+        data = rows_to_dict(files_check.parse_ads(result))
+        self.assertIn("2 entries", data["ads.txt"])
+        self.assertIn("1 DIRECT", data["ads.txt relationships"])
+
+    def test_parse_crossdomain(self):
+        result = {"ok": True, "size": 99, "text": '<cross-domain-policy><allow-access-from domain="*" secure="false"/></cross-domain-policy>'}
+        data = rows_to_dict(files_check.parse_crossdomain(result))
+        self.assertIn("Wildcard", data["crossdomain.xml policy"])
+        self.assertIn("plain HTTP", data["crossdomain.xml transport"])
+
+    def test_cms_parsers(self):
+        self.assertEqual(files_check.parse_wp_readme("<title>WordPress 6.4.1</title>"), "6.4.1")
+        self.assertEqual(files_check.parse_drupal_changelog("Drupal 10.2.0, 2023-12-06"), "10.2.0")
+        self.assertEqual(files_check.parse_wp_readme("<html>nothing</html>"), "")
+
+    def test_openid_config(self):
+        data = rows_to_dict(files_check.parse_openid_config('{"issuer": "https://auth.example.com", "grant_types_supported": ["code"]}'))
+        self.assertIn("auth.example.com", data["OpenID issuer"])
+
+
+class WebExtraDeepTests(unittest.TestCase):
+    def test_cdn_rows(self):
+        data = rows_to_dict(web_extra_check.cdn_rows({"CF-Ray": "abc", "Age": "12"}))
+        self.assertIn("Cloudflare", data["CDN detected"])
+        self.assertIn("12s", data["Cache age"])
+
+    def test_swagger_and_wpjson(self):
+        hint = web_extra_check.swagger_hint('{"openapi": "3.0.0", "info": {"title": "Pet"}, "paths": {"/a": {}, "/b": {}}}')
+        self.assertIn("3.0.0", hint)
+        self.assertIn("2 paths", hint)
+        hint = web_extra_check.wpjson_hint('{"name": "Blog", "namespaces": ["wp/v2", "oembed/1.0"]}')
+        self.assertIn("2 namespaces", hint)
+
+
+class ReputationDomainTests(unittest.TestCase):
+    def test_domain_blocklists(self):
+        resolver = FakeResolver({("example.com.multi.surbl.org", "A"): ["127.0.0.4"]})
+        rows = reputation_check.domain_blocklists("example.com", resolver)
+        data = rows_to_dict(rows)
+        self.assertIn("Listed", data["example.com on SURBL multi"])
+        self.assertEqual(data["example.com on Spamhaus DBL"], "Clean")
+        self.assertEqual(data["Domain listings"], "1 of 3")
+
+
+class JsDeepTests(unittest.TestCase):
+    def test_frameworks_versions_sinks(self):
+        texts = [("a.js", "webpack react-dom jQuery JavaScript Library v1.12.4 eval(x); document.write(y);")]
+        data = rows_to_dict(js_check.framework_rows(texts))
+        self.assertIn("webpack", data["JS frameworks"])
+        self.assertIn("React", data["JS frameworks"])
+        data = rows_to_dict(js_check.library_version_rows(texts))
+        self.assertEqual(data["JS library: jQuery"], "1.12.4")
+        data = rows_to_dict(js_check.danger_rows(texts))
+        self.assertEqual(data["Dangerous sinks"], "2")
+
+    def test_sourcemap_none(self):
+        import requests
+        rows = js_check.sourcemap_rows(requests.Session(), [("(inline scripts)", "var a = 1;")], 2)
+        self.assertEqual(rows[0][1], "None referenced")
+
+
+class PortsDeepTests(unittest.TestCase):
+    def test_banner_verdicts(self):
+        data = rows_to_dict(ports_check.banner_verdict(22, "SSH-2.0-OpenSSH_9.3"))
+        self.assertEqual(data["SSH version"], "9.3")
+        self.assertNotIn("SSH verdict", data)
+        data = rows_to_dict(ports_check.banner_verdict(3306, "J\x00\x00\x008.0.33-mysql-native"))
+        self.assertEqual(data["MySQL version"], "8.0.33")
+
+    def test_tls_detect_plaintext(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        def accept():
+            try:
+                conn, _ = server.accept()
+                time.sleep(1.5)
+                conn.close()
+            except Exception:
+                pass
+        thread = threading.Thread(target=accept, daemon=True)
+        thread.start()
+        try:
+            self.assertIn("Plaintext", ports_check.tls_detect("127.0.0.1", port, timeout=3))
+        finally:
+            server.close()
+
+    def test_udp_probe_open(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        server.bind(("127.0.0.1", 0))
+        port = server.getsockname()[1]
+        got = []
+        def reply():
+            try:
+                server.settimeout(5)
+                data, addr = server.recvfrom(512)
+                got.append(data)
+                server.sendto(data[:2] + b"\x81\x80" + data[4:], addr)
+            except Exception:
+                pass
+        thread = threading.Thread(target=reply, daemon=True)
+        thread.start()
+        real_probe = ports_check.udp_dns_probe
+        import random
+        ident = random.randint(1, 65535)
+        packet = ident.to_bytes(2, "big") + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x01"
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(4)
+        try:
+            sock.sendto(packet, ("127.0.0.1", port))
+            data, _ = sock.recvfrom(512)
+            self.assertEqual(data[:2], ident.to_bytes(2, "big"))
+        finally:
+            sock.close()
+            server.close()
+        self.assertTrue(got)
+
+    def test_ftp_anonymous_allowed(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        def serve():
+            try:
+                conn, _ = server.accept()
+                conn.settimeout(5)
+                conn.sendall(b"220 Test FTP\r\n")
+                conn.recv(256)
+                conn.sendall(b"331 Need password\r\n")
+                conn.recv(256)
+                conn.sendall(b"230 Logged in\r\n")
+                time.sleep(0.5)
+                conn.close()
+            except Exception:
+                pass
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        import domainscan.ports_check as ports_module
+        real_create = socket.create_connection
+        def fake_create(address, timeout=None, *args, **kwargs):
+            return real_create(("127.0.0.1", port), timeout=timeout)
+        with patch("socket.create_connection", side_effect=fake_create):
+            verdict = ports_module.ftp_anonymous("anything.example", timeout=4)
+        server.close()
+        self.assertIn("ALLOWED", verdict)
+
+
+class CrossDeepTests(unittest.TestCase):
+    def test_caa_issuer(self):
+        rows = cross_check.caa_issuer_rows("Let's Encrypt", ['0 issue "letsencrypt.org"'])
+        self.assertIn("Consistent", rows[0][1])
+        rows = cross_check.caa_issuer_rows("DigiCert Inc", ['0 issue "letsencrypt.org"'])
+        self.assertIn("Mismatch", rows[0][1])
+        rows = cross_check.caa_issuer_rows("X", [])
+        self.assertIn("any CA", rows[0][1])
+
+    def test_null_mx_spf(self):
+        rows = cross_check.null_mx_spf_note({"mx": ["0 ."], "txt": []})
+        self.assertIn("consistent", rows[0][1])
+        self.assertEqual(cross_check.null_mx_spf_note({"mx": ["10 mx.example.com."], "txt": []}), [])
+
+
+class BgpEnrichTests(unittest.TestCase):
+    def test_peeringdb_parse(self):
+        from unittest.mock import patch
+        entry = {"name": "ExampleNet", "aka": "EXN", "website": "https://example.net", "policy_general": "Open", "info_traffic": "1-5Gbps", "info_type": "NSP", "irr_as_set": "AS-EXN"}
+        with patch("domainscan.bgp_check.fetch_peeringdb", return_value=entry):
+            rows = bgp_check.asn_enrichment(64500)
+        data = rows_to_dict(rows)
+        self.assertEqual(data["AS64500 name"], "ExampleNet")
+        self.assertEqual(data["AS64500 peering policy"], "Open")
+
+
+class ScannerSectionsTests(LocalBase):
+    def test_new_sections_present(self):
+        result = scanner.run_scan(self.base + "/", include_ports=False, include_subdomains=False, timeout=5, crawl_pages=0, js_files=0, subdomain_web=0, include_recon=False)
+        sections = result["sections"]
+        for name in ("SEO", "Accessibility", "Performance", "Privacy", "Archive", "Certificates", "Typosquat", "Exposures"):
+            self.assertIn(name, sections)
+        self.assertIn("Quick profile", sections["Archive"][0][1])
+
+
+class SeoCollectTests(unittest.TestCase):
+    def test_collect_end_to_end(self):
+        html = "<html><head><title>Example page title here ok</title></head><body><h1>Hi</h1></body></html>"
+        rows = seo_check.collect(html, "http://127.0.0.1:9/", {}, 1)["rows"]
+        self.assertGreater(len(rows), 10)
+        data = rows_to_dict(rows)
+        self.assertEqual(data["Sitemap reference"], "No sitemap found")

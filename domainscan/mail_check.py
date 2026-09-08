@@ -56,6 +56,7 @@ def describe_mx(records, resolver=None):
         rows.append(("MX records", "Null MX (domain accepts no mail)"))
         return rows
     rows.append(("MX count", str(len(parsed))))
+    rows.extend(mx_health(parsed, resolver))
     ordered = sorted(parsed, key=lambda item: int(item[0]) if item[0].isdigit() else 999)
     for index, (preference, target) in enumerate(ordered, 1):
         if preference:
@@ -72,6 +73,10 @@ def describe_mx(records, resolver=None):
             rows.append(("MX " + str(index) + " PTR", mx_ptr(addresses[0])))
         rows.append(("MX " + str(index) + " SMTP", smtp_probe(target)))
         rows.append(("MX " + str(index) + " STARTTLS", smtp_starttls(target)))
+        if index <= 2:
+            rows.extend(smtp_ehlo_rows(target, index))
+        if index == 1:
+            rows.extend(smtp_tls_cert_rows(target))
         if resolver is not None and index <= 3:
             rows.append(("MX " + str(index) + " DANE", dane_status(resolver, target)))
     return rows
@@ -135,6 +140,123 @@ def read_smtp(sock, timeout=6):
     except Exception:
         pass
     return chunks.decode("utf-8", "ignore")
+
+
+def mx_health(parsed, resolver):
+    rows = []
+    prefs = [pref for pref, _ in parsed if pref]
+    if len(prefs) != len(set(prefs)):
+        rows.append(("MX preferences", "Duplicate preference values (load-balanced)"))
+    for _, target in parsed[:4]:
+        if not target:
+            continue
+        if resolver is not None:
+            try:
+                cname = dns_check.query(resolver, target, "CNAME")
+                if cname["records"]:
+                    rows.append(("MX alias: " + target, "Points to CNAME (violates RFC 2181)"))
+            except Exception:
+                pass
+        try:
+            addresses = socket.gethostbyname_ex(target)[2]
+        except Exception:
+            addresses = []
+        for address in addresses:
+            if is_private_ip(address):
+                rows.append(("MX address: " + target, address + " is private (unreachable from internet)"))
+    return rows
+
+
+def is_private_ip(address):
+    try:
+        parts = [int(bit) for bit in address.split(".")]
+    except Exception:
+        return False
+    if len(parts) != 4:
+        return False
+    if parts[0] == 10:
+        return True
+    if parts[0] == 172 and 16 <= parts[1] <= 31:
+        return True
+    if parts[0] == 192 and parts[1] == 168:
+        return True
+    if parts[0] == 127:
+        return True
+    return False
+
+
+def smtp_ehlo_rows(target, index):
+    rows = []
+    prefix = "MX " + str(index)
+    try:
+        sock = socket.create_connection((target, 25), timeout=6)
+    except Exception:
+        return rows
+    try:
+        banner = read_smtp(sock)
+        if not banner.startswith("220"):
+            return rows
+        sock.sendall(b"EHLO domainscan\r\n")
+        greeting = read_smtp(sock)
+        try:
+            sock.sendall(b"QUIT\r\n")
+        except Exception:
+            pass
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return rows
+    try:
+        sock.close()
+    except Exception:
+        pass
+    extensions = parse_ehlo(greeting)
+    if not extensions:
+        return rows
+    rows.append((prefix + " ESMTP", str(len(extensions)) + " extensions"))
+    interesting = [item for item in extensions if item.split()[0] in ("STARTTLS", "AUTH", "SIZE", "8BITMIME", "PIPELINING", "DSN", "SMTPUTF8", "CHUNKING")]
+    for item in interesting[:8]:
+        rows.append((prefix + " ESMTP " + item.split()[0], short(item, 120)))
+    auth = [item for item in extensions if item.startswith("AUTH")]
+    if auth:
+        rows.append((prefix + " AUTH mechs", short(auth[0].replace("AUTH", "").strip(), 120)))
+    return rows
+
+
+def parse_ehlo(greeting):
+    extensions = []
+    lines = (greeting or "").splitlines()
+    for line in lines[1:]:
+        match = re.match(r"^\d{3}[ -](.+)$", line.strip())
+        if not match:
+            continue
+        text = match.group(1).strip()
+        if text and text not in extensions:
+            extensions.append(text)
+    return extensions
+
+
+def smtp_tls_cert_rows(target):
+    try:
+        import shutil
+        import subprocess
+        if not shutil.which("openssl"):
+            return []
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", target + ":25", "-starttls", "smtp", "-showcerts"],
+            input="", capture_output=True, text=True, timeout=10)
+    except Exception:
+        return [("MX 1 TLS cert", "STARTTLS probe failed")]
+    output = proc.stdout or ""
+    if "BEGIN CERTIFICATE" not in output:
+        return []
+    rows = [("MX 1 TLS cert", "Certificate presented over STARTTLS")]
+    match = re.search(r"^\s*(?:\d+\s+)?s:(.+)$", output, re.MULTILINE)
+    if match:
+        rows.append(("MX 1 cert subject", short(match.group(1).strip(), 160)))
+    return rows
 
 
 def smtp_starttls(target, port=25):
@@ -283,6 +405,8 @@ def describe_dmarc(resolver, name):
         return rows
     value = dmarc[0]
     rows.append(("DMARC record", short(value, 300)))
+    if len(dmarc) > 1:
+        rows.append(("DMARC note", "Multiple DMARC records (invalid, receivers ignore)"))
     tags = {}
     for part in value.split(";"):
         if "=" in part:
@@ -300,6 +424,32 @@ def describe_dmarc(resolver, name):
     for key in ("rua", "ruf", "pct", "sp", "adkim", "aspf", "fo", "ri"):
         if tags.get(key):
             rows.append(("DMARC " + key, short(tags[key], 200)))
+    if policy in ("quarantine", "reject") and tags.get("pct", "100") != "100":
+        rows.append(("DMARC coverage", "Only " + tags.get("pct") + "% of mail enforced"))
+    rows.extend(dmarc_external_auth(resolver, name, tags.get("rua", "")))
+    return rows
+
+
+def dmarc_external_auth(resolver, name, rua):
+    rows = []
+    if not rua:
+        return rows
+    for mailbox in rua.split(","):
+        mailbox = mailbox.strip()
+        if "@" not in mailbox:
+            continue
+        host = mailbox.rsplit("@", 1)[1].strip().rstrip("!").rstrip(".")
+        if not host or host.lower() == name.lower() or host.lower().endswith("." + name.lower()):
+            continue
+        try:
+            result = dns_check.query(resolver, name + "._report._dmarc." + host, "TXT")
+            records = [dns_check.clean_txt(item) for item in result["records"]]
+        except Exception:
+            records = []
+        if any("v=dmarc1" in item.lower() for item in records):
+            rows.append(("DMARC auth " + host, "External reports authorized"))
+        else:
+            rows.append(("DMARC auth " + host, "Missing authorization (reports rejected)"))
     return rows
 
 
@@ -351,6 +501,7 @@ def describe_bimi_mtasts(resolver, name):
         records = [dns_check.clean_txt(item) for item in bimi["records"]]
         if records:
             rows.append(("BIMI", short(records[0], 200)))
+            rows.extend(bimi_logo_rows(records[0]))
         else:
             rows.append(("BIMI", "No BIMI record"))
     except Exception:
@@ -364,6 +515,31 @@ def describe_bimi_mtasts(resolver, name):
             rows.append(("MTA-STS", "No MTA-STS DNS record"))
     except Exception:
         rows.append(("MTA-STS", "Lookup failed"))
+    return rows
+
+
+def bimi_logo_rows(record):
+    rows = []
+    match = re.search(r"l=([^;\s]+)", record or "")
+    if not match:
+        return rows
+    url = match.group(1).strip()
+    rows.append(("BIMI logo", short(url, 200)))
+    if not url.lower().startswith("https://"):
+        rows.append(("BIMI logo URL", "Not HTTPS (invalid)"))
+        return rows
+    import requests
+    from domainscan.helpers import BROWSER_UA
+    try:
+        response = requests.head(url, timeout=8, headers={"User-Agent": BROWSER_UA}, allow_redirects=True)
+        if response.status_code == 405:
+            response = requests.get(url, timeout=8, headers={"User-Agent": BROWSER_UA}, stream=True)
+            response.close()
+        rows.append(("BIMI logo fetch", "HTTP " + str(response.status_code) + ", " + short(response.headers.get("Content-Type", "?"), 60)))
+    except Exception as exc:
+        rows.append(("BIMI logo fetch", "Failed (" + exc.__class__.__name__ + ")"))
+    if "a=" in record:
+        rows.append(("BIMI authority", short(re.search(r"a=([^;\s]+)", record).group(1), 160)))
     return rows
 
 
@@ -399,6 +575,17 @@ def describe_mta_sts_policy(name, base_url=None):
         rows.append(("MTA-STS policy", "Not published (HTTP " + str(response.status_code) + ")"))
         return rows
     rows.append(("MTA-STS policy", "Published"))
+    mode_match = re.search(r"^mode:\s*(.+)$", response.text or "", re.IGNORECASE | re.MULTILINE)
+    if mode_match:
+        mode = mode_match.group(1).strip().lower()
+        if mode == "enforce":
+            rows.append(("MTA-STS verdict", "Enforcing (unsigned mail rejected)"))
+        else:
+            rows.append(("MTA-STS verdict", "Testing only (no enforcement)"))
+    age_match = re.search(r"^max_age:\s*(\d+)", response.text or "", re.IGNORECASE | re.MULTILINE)
+    if age_match:
+        days = int(age_match.group(1)) // 86400
+        rows.append(("MTA-STS max age", age_match.group(1) + " seconds (~" + str(days) + " days)"))
     for field in ("version", "mode", "max_age"):
         match = re.search(r"^" + field + r":\s*(.+)$", response.text or "", re.IGNORECASE | re.MULTILINE)
         if match:

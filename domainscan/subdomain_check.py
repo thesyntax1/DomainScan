@@ -20,6 +20,16 @@ WORDLIST = [
     "v2", "eu", "us", "uk", "tr", "de", "fr", "partner", "partners", "client",
     "clients", "corp", "internal", "private", "public", "files", "drive", "cloud",
     "storage", "crm", "erp", "hr", "jobs", "careers", "marketing", "sales",
+    "graphql", "rest", "webhook", "hooks", "socket", "ws", "mqtt", "kafka",
+    "elastic", "kibana", "prometheus", "alertmanager", "sentry", "vault",
+    "consul", "nomad", "k8s", "kubernetes", "rancher", "openshift", "docker",
+    "registry", "artifacts", "nexus", "sonar", "gitlab", "bitbucket",
+    "redmine", "youtrack", "wiki2", "kb", "lms", "moodle", "academia",
+    "webinar", "events", "survey", "forms", "newsletter", "cdn2", "origin",
+    "edge", "lb", "ha", "dr", "uat", "qa", "preprod", "preview", "canary",
+    "ab", "labs", "research", "ai", "ml", "data", "analytics", "bi",
+    "reports", "dashboard", "admin2", "root", "super", "manage", "control",
+    "panel", "cpanel", "plesk", "webmin", "phpmyadmin", "dbadmin",
 ]
 
 TAKEOVER_SUFFIXES = [
@@ -31,6 +41,12 @@ TAKEOVER_SUFFIXES = [
     "helpscoutdocs.com", "surge.sh", "ngrok.io", "pantheonsite.io",
     "netlify.app", "vercel.app", "pages.dev", "webflow.io", "thinkific.com",
     "teachable.com", "bigcartel.com", "squarespace.com", "weebly.com",
+    "animaapp.io", "apology.io", "aftership.com", "aha.io", "helpjuice.com",
+    "helprace.com", "landingi.com", "mashery.com", "ngrok-free.app",
+    "pingdom.com", "proposify.com", "readthedocs.io", "short.io",
+    "smugmug.com", "strikingly.com", "tilda.ws", "wixsite.com",
+    "wordpress.org", "worksites.net", "yolasite.com", "hatenablog.com",
+    "feedpress.com", "gemfury.com", "jit.si", "kinsta.cloud",
 ]
 
 

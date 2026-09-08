@@ -231,6 +231,7 @@ class DomainScanApp:
                 crawl_pages=caps["crawl_pages"],
                 js_files=caps["js_files"],
                 subdomain_web=caps["subdomain_web"],
+                include_recon=caps["include_recon"],
             )
         except ValueError as exc:
             self.queue.put(("invalid", str(exc)))

@@ -31,6 +31,62 @@ def describe_ip(ip):
         peers = fetch_asn_peers(asn)
         if peers is not None:
             parse_peers(peers, asn, rows)
+        rows.extend(asn_enrichment(asn))
+    return rows
+
+
+def asn_enrichment(asn):
+    rows = []
+    entry = fetch_peeringdb(asn)
+    if entry:
+        rows.append(("AS" + str(asn) + " PeeringDB", "Listed"))
+        for key, label in (("name", "name"), ("aka", "aka"), ("website", "website"),
+                            ("policy_general", "peering policy"), ("info_traffic", "traffic level"),
+                            ("info_type", "network type"), ("irr_as_set", "AS-SET")):
+            if entry.get(key):
+                rows.append(("AS" + str(asn) + " " + label, short(str(entry[key]), 140)))
+        return rows
+    return asn_rdap_rows(asn)
+
+
+def fetch_peeringdb(asn):
+    import requests
+    try:
+        response = requests.get("https://www.peeringdb.com/api/net.json?asn=" + str(asn), timeout=10, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return None
+    entries = data.get("data", []) or []
+    if entries:
+        return entries[0]
+    return None
+
+
+def asn_rdap_rows(asn):
+    from domainscan import rdap_check, whois_check
+    rows = []
+    try:
+        data = rdap_check.bootstrap("asn")
+        urls = rdap_check.find_services(data, "asn", str(asn))
+    except Exception:
+        return rows
+    payload = None
+    for base in urls or []:
+        try:
+            payload = rdap_check.rdap_get(base.rstrip("/") + "/autnum/" + str(asn))
+            break
+        except Exception:
+            continue
+    if not payload:
+        return rows
+    rows.append(("AS" + str(asn) + " RDAP", "Record found"))
+    if payload.get("name"):
+        rows.append(("AS" + str(asn) + " name", short(payload["name"], 120)))
+    if payload.get("country"):
+        rows.append(("AS" + str(asn) + " country", str(payload["country"])))
+    for entity in (payload.get("entities", []) or [])[:2]:
+        for key, value in whois_check.parse_entity(entity, "")[:4]:
+            rows.append(("AS" + str(asn) + " " + key.lower(), value))
     return rows
 
 

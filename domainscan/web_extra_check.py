@@ -26,6 +26,9 @@ def collect(base_url, headers=None, timeout=10):
     rows.extend(waf_probe(session, base_url, timeout))
     rows.append(("HSTS preload", hsts_preload(host)))
     rows.append(("IPv6 web", ipv6_web(host, base_url)))
+    rows.extend(cdn_rows(headers or {}))
+    rows.extend(redirect_rows(session, base_url, timeout))
+    rows.extend(host_injection_rows(session, base_url, timeout))
     rows.extend(probe_404(session, base_url, timeout))
     rows.extend(sensitive_checks(session, base_url, timeout))
     rows.extend(api_discovery(session, base_url, timeout))
@@ -117,6 +120,15 @@ def cors_check(session, base_url, timeout):
     creds = response.headers.get("Access-Control-Allow-Credentials", "")
     if creds.lower() == "true":
         rows.append(("CORS credentials", "Allowed (review with origin policy)"))
+    try:
+        null_probe = session.get(base_url + "/", timeout=timeout, headers={"Origin": "null"})
+        null_acao = null_probe.headers.get("Access-Control-Allow-Origin", "")
+        if null_acao == "null":
+            rows.append(("CORS null origin", "Trusted (misconfigured, allows sandboxed requests)"))
+        else:
+            rows.append(("CORS null origin", "Not trusted"))
+    except Exception:
+        rows.append(("CORS null origin", "Probe failed"))
     return rows
 
 
@@ -140,6 +152,28 @@ def waf_signature(headers, body):
     if "awselb" in low_headers or "awselb" in low_headers:
         return "AWS ELB"
     if "x-sucuri-id" in low_headers:
+        return "Sucuri"
+    if "x-waf" in low_headers or "waf-event" in low_headers:
+        return "Generic WAF"
+    if "mod_security" in low_body or "modsecurity" in low_body or "not acceptable" in low_body:
+        return "ModSecurity"
+    if "wordfence" in low_body or "wfblock" in low_body:
+        return "Wordfence"
+    if "cloudflare" in low_body and ("attention required" in low_body or "cf-error" in low_body):
+        return "Cloudflare"
+    if "request unsuccessful" in low_body and "incapsula" in low_body:
+        return "Imperva"
+    if "reference #" in low_body and "akamai" in low_body:
+        return "Akamai"
+    if "aws-waf" in low_headers or "awselb/2.0" in low_headers:
+        return "AWS WAF"
+    if "x-azure-ref" in low_headers and "403" in low_body:
+        return "Azure WAF"
+    if "x-nf-request-id" in low_headers:
+        return "Netlify"
+    if "x-vercel" in low_headers:
+        return "Vercel"
+    if "x-sucuri-cache" in low_headers:
         return "Sucuri"
     return ""
 
@@ -182,6 +216,8 @@ def api_discovery(session, base_url, timeout):
         "/swagger.json",
         "/openapi.json",
         "/api-docs",
+        "/wp-json/",
+        "/api/openapi.json",
     ]
     for path in targets:
         try:
@@ -195,7 +231,14 @@ def api_discovery(session, base_url, timeout):
         if path == "/.well-known/openid-configuration" and status == 200:
             rows.append(("API " + path, parse_openid(body)))
         elif path == "/graphql":
-            rows.append(("API " + path, graphql_hint(status, body, ctype)))
+            hint = graphql_hint(status, body, ctype)
+            rows.append(("API " + path, hint))
+            if "likely" in hint or "possible" in hint:
+                rows.extend(graphql_introspection(session, base_url, timeout))
+        elif path in ("/swagger.json", "/openapi.json", "/api/openapi.json") and status == 200:
+            rows.append(("API " + path, swagger_hint(body)))
+        elif path == "/wp-json/" and status == 200:
+            rows.append(("API " + path, wpjson_hint(body)))
         elif status == 200:
             rows.append(("API " + path, "Exists (HTTP 200, " + str(len(body)) + " bytes)"))
         elif status in (401, 403):
@@ -301,6 +344,138 @@ def probe_404(session, base_url, timeout):
     elif response.status_code in (401, 403):
         rows.append(("404 handling", "Blocked (" + str(response.status_code) + "), possible WAF"))
     return rows
+
+
+def cdn_rows(headers):
+    rows = []
+    low = " ".join((name + " " + value for name, value in headers.items())).lower()
+    names = dict(headers)
+    found = []
+    if "cf-ray" in low or names.get("Server", "").lower() == "cloudflare":
+        found.append("Cloudflare")
+    if "x-amz-cf-id" in low or "cloudfront" in low:
+        found.append("CloudFront")
+    if "fastly" in low:
+        found.append("Fastly")
+    if "akamai" in low or "x-akamai" in low:
+        found.append("Akamai")
+    if "bunnycdn" in low:
+        found.append("BunnyCDN")
+    if "keycdn" in low:
+        found.append("KeyCDN")
+    if "x-vercel-cache" in low:
+        found.append("Vercel")
+    if "x-nf-request-id" in low:
+        found.append("Netlify")
+    if "x-github-request-id" in low:
+        found.append("GitHub Pages")
+    if "x-sucuri" in low:
+        found.append("Sucuri")
+    if "incapsula" in low:
+        found.append("Imperva")
+    if found:
+        rows.append(("CDN detected", ", ".join(found)))
+    else:
+        rows.append(("CDN detected", "None identified in headers"))
+    if names.get("Age", ""):
+        rows.append(("Cache age", names.get("Age") + "s (response served from cache)"))
+    return rows
+
+
+def redirect_rows(session, base_url, timeout):
+    rows = []
+    params = ["next", "url", "redirect", "return", "continue", "dest", "r", "u"]
+    vulnerable = []
+    tested = 0
+    for param in params:
+        try:
+            response = session.get(base_url + "/", params={param: "https://evil.example/"}, timeout=6, allow_redirects=False)
+            tested += 1
+        except Exception:
+            continue
+        location = response.headers.get("Location", "")
+        if response.status_code in (301, 302, 303, 307, 308) and "evil.example" in location:
+            vulnerable.append(param)
+    rows.append(("Redirect params tested", str(tested)))
+    if vulnerable:
+        rows.append(("Open redirect", "VULNERABLE via: " + ", ".join(vulnerable)))
+    else:
+        rows.append(("Open redirect", "No reflection on common parameters"))
+    return rows
+
+
+def host_injection_rows(session, base_url, timeout):
+    rows = []
+    try:
+        response = session.get(base_url + "/", timeout=timeout, headers={"Host": "evil.example"}, allow_redirects=False)
+    except Exception as exc:
+        rows.append(("Host header test", "Request failed (" + exc.__class__.__name__ + ")"))
+        return rows
+    location = response.headers.get("Location", "")
+    body = (response.text or "")[:2000]
+    if "evil.example" in location:
+        rows.append(("Host header test", "Location reflects injected host (cache poisoning risk)"))
+    elif "evil.example" in body.lower():
+        rows.append(("Host header test", "Body reflects injected host (review)"))
+    else:
+        rows.append(("Host header test", "Injected host not reflected (HTTP " + str(response.status_code) + ")"))
+    return rows
+
+
+def graphql_introspection(session, base_url, timeout):
+    rows = []
+    try:
+        response = session.post(base_url + "/graphql", json={"query": "{__typename}"}, timeout=8)
+    except Exception:
+        rows.append(("GraphQL introspection", "Probe failed"))
+        return rows
+    body = response.text or ""
+    if '"__typename"' in body and '"data"' in body:
+        rows.append(("GraphQL introspection", "Enabled (schema queryable)"))
+    elif response.status_code in (400, 401, 403):
+        rows.append(("GraphQL introspection", "Blocked (HTTP " + str(response.status_code) + ")"))
+    else:
+        rows.append(("GraphQL introspection", "HTTP " + str(response.status_code) + " (review)"))
+    return rows
+
+
+def swagger_hint(body):
+    import json
+    try:
+        data = json.loads(body or "")
+    except Exception:
+        return "Exists but not valid JSON"
+    version = data.get("openapi", "") or data.get("swagger", "")
+    title = ""
+    try:
+        title = (data.get("info", {}) or {}).get("title", "")
+    except Exception:
+        title = ""
+    detail = "Spec published"
+    if version:
+        detail = detail + " (OpenAPI " + str(version) + ")"
+    if title:
+        detail = detail + ", " + short(title, 80)
+    paths = data.get("paths", {}) or {}
+    if isinstance(paths, dict) and paths:
+        detail = detail + ", " + str(len(paths)) + " paths"
+    return detail
+
+
+def wpjson_hint(body):
+    import json
+    try:
+        data = json.loads(body or "")
+    except Exception:
+        return "Exists but not valid JSON"
+    detail = "WordPress REST API exposed"
+    if isinstance(data, dict):
+        if data.get("name"):
+            detail = detail + " (" + short(data["name"], 60) + ")"
+        namespaces = data.get("namespaces", []) or []
+        if namespaces:
+            detail = detail + ", " + str(len(namespaces)) + " namespaces"
+    return detail
 
 
 def sensitive_checks(session, base_url, timeout):

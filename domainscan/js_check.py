@@ -64,7 +64,129 @@ def collect(page_url, html, timeout=8, max_files=6):
             rows.append(("Secret " + str(index), kind + " in " + label + " (" + preview + ")"))
     else:
         rows.append(("Possible secrets", "None spotted"))
+    rows.extend(framework_rows(texts))
+    rows.extend(library_version_rows(texts))
+    rows.extend(danger_rows(texts))
+    rows.extend(sourcemap_rows(session, texts, timeout))
     return {"rows": rows}
+
+
+FRAMEWORKS = [
+    ("webpack", "webpack"),
+    ("React", "react-dom"),
+    ("React", "_reactroot"),
+    ("Vue", "__vue__"),
+    ("Vue", "vue-router"),
+    ("Angular", "ng-version"),
+    ("Angular", "@angular/core"),
+    ("Ember", "ember-"),
+    ("Backbone", "backbone-min"),
+    ("Svelte", "svelte-"),
+    ("Next.js", "__next"),
+    ("Nuxt", "__nuxt"),
+    ("Alpine.js", "alpinejs"),
+    ("htmx", "htmx.org"),
+    ("Meteor", "__meteor"),
+]
+
+
+def framework_rows(texts):
+    rows = []
+    blob = " ".join(body or "" for _, body in texts).lower()
+    found = []
+    for name, marker in FRAMEWORKS:
+        if marker in blob and name not in found:
+            found.append(name)
+    if found:
+        rows.append(("JS frameworks", ", ".join(found)))
+    else:
+        rows.append(("JS frameworks", "None identified"))
+    return rows
+
+
+LIB_VERSIONS = [
+    ("jQuery", r"jquery[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("React", r"react[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("Vue", r"vue[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("Angular", r"@angular/core[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("Lodash", r"lodash[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("Moment", r"moment[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("D3", r"d3[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+    ("Bootstrap", r"bootstrap[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)"),
+]
+
+
+def library_version_rows(texts):
+    rows = []
+    blob = " ".join(body or "" for _, body in texts)
+    hits = []
+    for name, pattern in LIB_VERSIONS:
+        match = re.search(pattern, blob, re.IGNORECASE)
+        if match and name not in [item[0] for item in hits]:
+            hits.append((name, match.group(1)))
+    if not hits:
+        return rows
+    for name, version in hits[:8]:
+        rows.append(("JS library: " + name, version))
+    for name, version in hits:
+        if name == "jQuery" and version.split(".")[0] in ("1", "2"):
+            rows.append(("jQuery in JS", "End-of-life " + version + " (known XSS issues)"))
+    return rows
+
+
+def danger_rows(texts):
+    rows = []
+    blob = " ".join(body or "" for _, body in texts)
+    counts = {
+        "eval() calls": blob.count("eval("),
+        "document.write": blob.count("document.write"),
+        "innerHTML writes": blob.count(".innerHTML=") + blob.count(".innerHTML ="),
+        "outerHTML writes": blob.count(".outerHTML=") + blob.count(".outerHTML ="),
+        "setTimeout strings": blob.count("setTimeout(" + chr(34)) + blob.count("setTimeout(" + chr(39)),
+    }
+    total = sum(counts.values())
+    rows.append(("Dangerous sinks", str(total)))
+    for label, count in counts.items():
+        if count:
+            rows.append(("Sink: " + label, str(count)))
+    return rows
+
+
+def sourcemap_rows(session, texts, timeout):
+    rows = []
+    maps = []
+    for label, body in texts:
+        for match in re.findall(r"sourceMappingURL=([^\s\*'\"]+)", body or ""):
+            candidate = match.strip()
+            if label.startswith("http"):
+                full = urllib.parse.urljoin(label, candidate)
+            else:
+                full = candidate
+            if full.startswith("http") and full not in [item[1] for item in maps]:
+                maps.append((label, full))
+    if not maps:
+        rows.append(("Source maps", "None referenced"))
+        return rows
+    rows.append(("Source maps", str(len(maps)) + " referenced"))
+    for label, url in maps[:3]:
+        try:
+            response = session.get(url, timeout=timeout)
+        except Exception:
+            rows.append(("Source map", short(url, 160) + " (fetch failed)"))
+            continue
+        if response.status_code != 200:
+            rows.append(("Source map", short(url, 160) + " (HTTP " + str(response.status_code) + ")"))
+            continue
+        try:
+            data = response.json()
+            sources = data.get("sources", []) or []
+        except Exception:
+            rows.append(("Source map", short(url, 160) + " (not valid JSON)"))
+            continue
+        rows.append(("Source map", short(url, 160) + " exposes " + str(len(sources)) + " source paths"))
+        for source in sources[:5]:
+            rows.append(("Map source", short(str(source), 160)))
+    return rows
 
 
 def extract_inline_js(html):

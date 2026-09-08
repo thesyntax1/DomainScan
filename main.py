@@ -60,6 +60,7 @@ def main_cli(argv):
         crawl_pages=caps["crawl_pages"],
         js_files=caps["js_files"],
         subdomain_web=caps["subdomain_web"],
+        include_recon=caps["include_recon"],
     )
     meta = result["meta"]
     print("Target: " + result["target"]["host"])

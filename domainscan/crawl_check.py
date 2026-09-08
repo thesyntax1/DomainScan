@@ -1,4 +1,5 @@
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
@@ -30,16 +31,18 @@ def collect(start_url, timeout=8, max_pages=15):
 
         def fetch(url):
             try:
+                started = time.perf_counter()
                 response = session.get(url, timeout=timeout)
-                return (url, response.status_code, response.text or "", len(response.content or b""))
+                elapsed = int((time.perf_counter() - started) * 1000)
+                return (url, response.status_code, response.text or "", len(response.content or b""), elapsed)
             except Exception:
-                return (url, 0, "", 0)
+                return (url, 0, "", 0, 0)
 
         with ThreadPoolExecutor(max_workers=6) as pool:
-            for url, status, text, size in pool.map(fetch, batch):
+            for url, status, text, size, elapsed in pool.map(fetch, batch):
                 if len(visited) >= max_pages:
                     break
-                visited[url] = (status, text, size)
+                visited[url] = (status, text, size, elapsed)
                 if status == 200:
                     for link in extract_links(text, url):
                         if len(queue) > 200:
@@ -49,22 +52,50 @@ def collect(start_url, timeout=8, max_pages=15):
     rows.append(("Pages crawled", str(len(visited))))
     broken = []
     index = 0
-    for url, (status, text, size) in visited.items():
+    codes = {}
+    titles = {}
+    external = {}
+    slowest = ("", 0)
+    total_bytes = 0
+    for url, (status, text, size, elapsed) in visited.items():
         index += 1
+        total_bytes += size
+        codes[status] = codes.get(status, 0) + 1
         path = urllib.parse.urlsplit(url).path or "/"
         if status == 0:
             rows.append(("Page " + str(index), short(path, 120) + " fetch failed"))
         else:
             title = extract_title(text)
-            detail = str(status) + " " + short(path, 100) + " (" + str(size) + " bytes)"
+            detail = str(status) + " " + short(path, 100) + " (" + str(size) + " bytes, " + str(elapsed) + " ms)"
             if title:
                 detail = detail + " " + title
+                titles.setdefault(title, []).append(url)
             rows.append(("Page " + str(index), detail))
+        if elapsed > slowest[1]:
+            slowest = (url, elapsed)
         if status == 404 or status >= 500 or status == 0:
             broken.append((url, status))
+        for link in extract_links(text, url):
+            host = (urllib.parse.urlsplit(link).hostname or "").lower()
+            if host and host != base_host:
+                external[host] = external.get(host, 0) + 1
+    rows.append(("Crawl bytes", str(total_bytes) + " bytes total"))
+    summary = ", ".join(str(code) + "x" + str(count) for code, count in sorted(codes.items()))
+    rows.append(("Status codes", summary))
+    if slowest[0]:
+        rows.append(("Slowest page", str(slowest[1]) + " ms " + short(slowest[0], 140)))
     rows.append(("Broken pages", str(len(broken))))
     for url, status in broken[:10]:
         rows.append(("Broken", str(status) + " " + short(url, 160)))
+    dupes = {title: urls for title, urls in titles.items() if len(urls) > 1}
+    if dupes:
+        rows.append(("Duplicate titles", str(len(dupes))))
+        for title in list(dupes)[:5]:
+            rows.append(("Duplicate title", short(title, 120) + " (" + str(len(dupes[title])) + " pages)"))
+    if external:
+        rows.append(("External domains", str(len(external))))
+        for host in sorted(external, key=lambda h: -external[h])[:8]:
+            rows.append(("External: " + host, str(external[host]) + " links"))
     return {"rows": rows}
 
 

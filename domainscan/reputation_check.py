@@ -6,6 +6,15 @@ LISTS = [
     ("SpamCop", "bl.spamcop.net"),
     ("Barracuda", "b.barracudacentral.org"),
     ("PSBL", "psbl.surriel.com"),
+    ("UCEPROTECT", "dnsbl-1.uceprotect.net"),
+    ("SORBS", "dnsbl.sorbs.net"),
+    ("Abuseat CBL", "cbl.abuseat.org"),
+]
+
+DOMAIN_LISTS = [
+    ("SURBL multi", "multi.surbl.org"),
+    ("Spamhaus DBL", "dbl.spamhaus.org"),
+    ("SEM URI", "uribl.spameatingmonkey.net"),
 ]
 
 SPAMHAUS_CODES = {
@@ -18,8 +27,10 @@ SPAMHAUS_CODES = {
 }
 
 
-def collect(ips, resolver=None):
+def collect(ips, resolver=None, domain=""):
     rows = []
+    if domain and "." in domain:
+        rows.extend(domain_blocklists(domain, resolver))
     unique = []
     for ip in ips or []:
         if ip and ip not in unique:
@@ -58,6 +69,33 @@ def collect(ips, resolver=None):
                 rows.append((label, "Clean"))
     rows.append(("DNSBL listings", str(listed) + " of " + str(checked) + " checks"))
     return {"rows": rows}
+
+
+def domain_blocklists(domain, resolver):
+    rows = []
+    if not dns_check.HAS_DNSPYTHON and resolver is None:
+        rows.append(("Domain blocklists", "Skipped (dnspython not installed)"))
+        return rows
+    if resolver is None:
+        try:
+            resolver = dns_check.make_resolver()
+        except Exception:
+            rows.append(("Domain blocklists", "Resolver unavailable"))
+            return rows
+    listed = 0
+    for short_name, zone in DOMAIN_LISTS:
+        try:
+            result = dns_check.query(resolver, domain + "." + zone, "A")
+            records = result["records"]
+        except Exception:
+            records = []
+        if records:
+            listed += 1
+            rows.append((domain + " on " + short_name, "Listed (" + ", ".join(records[:3]) + ")"))
+        else:
+            rows.append((domain + " on " + short_name, "Clean"))
+    rows.append(("Domain listings", str(listed) + " of " + str(len(DOMAIN_LISTS))))
+    return rows
 
 
 def describe_codes(records, short_name):

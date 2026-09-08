@@ -8,6 +8,7 @@ def collect(info, apex, dns_data, web, whois_ns, timeout=8):
     rows = []
     rows.extend(ns_consistency((dns_data.get("ns_apex") or dns_data.get("ns") or []), whois_ns or []))
     rows.extend(dnssec_completeness(dns_data))
+    rows.extend(null_mx_spf_note(dns_data))
     soa_records = dns_data.get("soa_apex") or dns_data.get("soa") or []
     if soa_records:
         rows.append(("SOA serial", soa_serial_verdict(soa_records[0])))
@@ -30,9 +31,66 @@ def collect(info, apex, dns_data, web, whois_ns, timeout=8):
             if candidate not in names:
                 names.append(candidate)
         rows.extend(tls_coverage_rows(cert, names))
+        issuer = http_check.cert_names(cert.get("issuer", [])).get("organizationName", "")
+        rows.extend(caa_issuer_rows(issuer, dns_data.get("caa_apex") or dns_data.get("caa") or []))
     except Exception:
         rows.append(("Certificate cross-check", "TLS fetch failed"))
     return {"rows": rows}
+
+
+def null_mx_spf_note(dns_data):
+    mx_records = dns_data.get("mx_apex") or dns_data.get("mx") or []
+    txt_records = dns_data.get("txt_apex") or dns_data.get("txt") or []
+    if not mx_records:
+        return []
+    first = mx_records[0].split()
+    null_mx = len(mx_records) == 1 and len(first) == 2 and first[1].rstrip(".") == ""
+    if not null_mx:
+        return []
+    has_spf = any(item.lower().startswith("v=spf1") for item in txt_records)
+    if has_spf:
+        return [("Null MX vs SPF", "Null MX rejects all mail; SPF record is harmless but redundant")]
+    return [("Null MX vs SPF", "Null MX set, no SPF (consistent, domain sends no mail)")]
+
+
+def caa_issuer_rows(issuer_org, caa_records):
+    rows = []
+    tags = []
+    for record in caa_records or []:
+        match = re.match(r'^\s*\d+\s+issue\s+"?([^";\s]+)"?', record or "", re.IGNORECASE)
+        if match and match.group(1) != ";":
+            tags.append(match.group(1).lower())
+    if not tags:
+        return [("CAA vs issuer", "No CAA issue tags (any CA may issue)")]
+    issuer = re.sub(r"[^a-z0-9]", "", (issuer_org or "").lower())
+    known = {
+        "letsencrypt": "letsencrypt.org",
+        "digicert": "digicert.com",
+        "sectigo": "sectigo.com",
+        "comodo": "comodoca.com",
+        "globalsign": "globalsign.com",
+        "godaddy": "godaddy.com",
+        "zerossl": "zerossl.com",
+        "amazon": "amazon.com",
+        "google": "pki.goog",
+        "cloudflare": "cloudflare.com",
+        "entrust": "entrust.net",
+        "geotrust": "geotrust.com",
+        "thawte": "thawte.com",
+        "rapidssl": "rapidssl.com",
+    }
+    expected = ""
+    for key, tag in known.items():
+        if key in issuer:
+            expected = tag
+            break
+    if expected and any(expected in tag or tag in expected for tag in tags):
+        rows.append(("CAA vs issuer", "Consistent (" + issuer_org + " allowed by CAA)"))
+    elif expected:
+        rows.append(("CAA vs issuer", "Mismatch: cert from " + issuer_org + " but CAA allows " + ", ".join(tags[:4])))
+    else:
+        rows.append(("CAA vs issuer", "Issuer " + (issuer_org or "unknown") + " not in known CA map"))
+    return rows
 
 
 def normalize_names(names):

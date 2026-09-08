@@ -150,6 +150,8 @@ def analyze_soup(soup, page_url, html):
     rows.append(("External scripts", str(len(external))))
     for index, src in enumerate(external[:10], 1):
         rows.append(("Script " + str(index), short(src, 200)))
+    rows.extend(sri_rows(soup))
+    rows.extend(jquery_rows(soup, html))
     styles = []
     for tag in soup.find_all("link", href=True):
         rel = tag.get("rel", [])
@@ -170,6 +172,7 @@ def analyze_soup(soup, page_url, html):
     rows.append(("Input count", str(len(soup.find_all("input")))))
     rows.append(("Password fields", str(len(soup.find_all("input", {"type": "password"})))))
     rows.extend(login_form_rows(forms))
+    rows.extend(form_security_rows(forms, page_url))
     rows.append(("Button count", str(len(soup.find_all("button")))))
     rows.append(("Iframe count", str(len(soup.find_all("iframe")))))
     for index, frame in enumerate(soup.find_all("iframe", src=True)[:5], 1):
@@ -185,6 +188,10 @@ def analyze_soup(soup, page_url, html):
         else:
             rows.append(("Mixed content refs", "None"))
     rows.extend(comment_rows(soup))
+    rows.extend(trace_rows(html))
+    rows.extend(dom_rows(soup))
+    rows.extend(pwa_rows(soup, html))
+    rows.extend(resource_host_rows(soup, page_url))
     inline_js = "\n".join(tag.string or "" for tag in soup.find_all("script") if not tag.get("src"))
     paths = extract_js_paths(inline_js)
     rows.append(("JS paths (inline)", str(len(paths))))
@@ -206,6 +213,159 @@ def analyze_soup(soup, page_url, html):
     for index, (word, count) in enumerate(top_words(text), 1):
         rows.append(("Top word " + str(index), word + " (" + str(count) + " times)"))
     rows.extend(find_contacts(html, hrefs))
+    return rows
+
+
+def sri_rows(soup):
+    rows = []
+    scripts = soup.find_all("script", src=True)
+    if scripts:
+        protected = sum(1 for tag in scripts if tag.get("integrity"))
+        rows.append(("Scripts with integrity", str(protected) + " of " + str(len(scripts))))
+        if protected < len(scripts):
+            rows.append(("SRI gap (JS)", str(len(scripts) - protected) + " scripts lack Subresource Integrity"))
+    styles = [tag for tag in soup.find_all("link", href=True) if "stylesheet" in str(tag.get("rel", "")).lower()]
+    if styles:
+        protected = sum(1 for tag in styles if tag.get("integrity"))
+        rows.append(("Stylesheets with integrity", str(protected) + " of " + str(len(styles))))
+    return rows
+
+
+def jquery_rows(soup, html):
+    rows = []
+    version = ""
+    for tag in soup.find_all("script", src=True):
+        src = tag.get("src", "") or ""
+        match = re.search(r"jquery[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)", src, re.IGNORECASE)
+        if match:
+            version = match.group(1)
+            break
+    if not version:
+        version = extract_version(html, r"jQuery(?: JavaScript Library)? v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)")
+    if not version:
+        return rows
+    rows.append(("jQuery version", version))
+    try:
+        major = int(version.split(".")[0])
+    except Exception:
+        major = 3
+    if major < 3:
+        rows.append(("jQuery verdict", "Version 1.x/2.x is end-of-life (known XSS issues)"))
+    elif version.startswith("3."):
+        rows.append(("jQuery verdict", "Version 3.x (maintained branch)"))
+    return rows
+
+
+def form_security_rows(forms, page_url):
+    rows = []
+    if not forms:
+        return rows
+    csrf_names = ("csrf", "xsrf", "authenticity_token", "__requestverificationtoken", "_token", "nonce", "form_token")
+    without_token = 0
+    uploads = 0
+    get_with_password = 0
+    external_http = 0
+    for form in forms:
+        inputs = form.find_all("input")
+        names = " ".join((tag.get("name", "") or "") + " " + (tag.get("id", "") or "") for tag in inputs).lower()
+        if not any(token in names for token in csrf_names):
+            without_token += 1
+        if any((tag.get("type", "") or "").lower() == "file" for tag in inputs):
+            uploads += 1
+        method = (form.get("method", "get") or "get").lower()
+        if method == "get" and any((tag.get("type", "") or "").lower() == "password" for tag in inputs):
+            get_with_password += 1
+        action = form.get("action", "") or ""
+        if action.lower().startswith("http://"):
+            external_http += 1
+    rows.append(("Forms without CSRF token", str(without_token) + " of " + str(len(forms))))
+    if uploads:
+        rows.append(("File upload forms", str(uploads)))
+    if get_with_password:
+        rows.append(("Password over GET", str(get_with_password) + " forms (credentials in URL)"))
+    if external_http:
+        rows.append(("Forms to plain HTTP", str(external_http)))
+    novalidate = sum(1 for form in forms if form.has_attr("novalidate"))
+    if novalidate:
+        rows.append(("Forms with novalidate", str(novalidate)))
+    return rows
+
+
+def trace_rows(html):
+    rows = []
+    patterns = {
+        "Python traceback": "Traceback (most recent call last)",
+        "PHP fatal error": "Fatal error:",
+        "PHP warning": "Warning: mysql",
+        "ASP.NET error": "Server Error in '/' Application",
+        ".NET exception": "NullReferenceException",
+        "Java stack trace": "at java.base/java",
+        "SQL error": "SQL syntax",
+        "Oracle error": "ORA-",
+        "Django error": "DisallowedHost",
+        "Node error": "at async ",
+    }
+    low = (html or "")
+    hits = [label for label, marker in patterns.items() if marker in low]
+    if hits:
+        rows.append(("Error disclosure", str(len(hits)) + " stack-trace markers: " + ", ".join(hits)))
+    else:
+        rows.append(("Error disclosure", "No stack-trace markers"))
+    return rows
+
+
+def dom_rows(soup):
+    rows = []
+    tags = soup.find_all(True)
+    rows.append(("DOM elements", str(len(tags))))
+    kinds = set(tag.name for tag in tags)
+    rows.append(("DOM tag kinds", str(len(kinds))))
+    if tags and len(tags) <= 20000:
+        depth = 0
+        for tag in tags:
+            level = 0
+            parent = tag.parent
+            while parent is not None and getattr(parent, "name", "") != "[document]":
+                level += 1
+                parent = parent.parent
+                if level > 60:
+                    break
+            if level > depth:
+                depth = level
+        rows.append(("DOM max depth", str(depth)))
+    return rows
+
+
+def pwa_rows(soup, html):
+    rows = []
+    manifest = soup.find("link", attrs={"rel": "manifest"})
+    if manifest:
+        rows.append(("Web manifest", "Linked (" + short(manifest.get("href", ""), 120) + ")"))
+    else:
+        rows.append(("Web manifest", "Not linked"))
+    if "serviceWorker" in (html or "") and "register" in (html or ""):
+        rows.append(("Service worker", "Registration code found"))
+    else:
+        rows.append(("Service worker", "No registration code"))
+    return rows
+
+
+def resource_host_rows(soup, page_url):
+    rows = []
+    base_host = (urllib.parse.urlsplit(page_url).hostname or "").lower()
+    hosts = {}
+    for tag in soup.find_all(["script", "link", "img"]):
+        src = tag.get("src", "") or tag.get("href", "")
+        if src.lower().startswith("http"):
+            host = (urllib.parse.urlsplit(src).hostname or "").lower()
+            if host and host != base_host:
+                hosts[host] = hosts.get(host, 0) + 1
+    if not hosts:
+        rows.append(("Resource hosts", "All resources are same-host"))
+        return rows
+    rows.append(("Resource hosts", str(len(hosts)) + " external hosts"))
+    for index, host in enumerate(sorted(hosts, key=lambda h: -hosts[h])[:10], 1):
+        rows.append(("Resource host " + str(index), host + " (" + str(hosts[host]) + " refs)"))
     return rows
 
 
@@ -792,4 +952,210 @@ def detect_tech(html, headers, cookies, metas):
         add("WordPress", "Session cookie observed")
     if "__RequestVerificationToken" in cookie_names:
         add("ASP.NET", "Verification cookie observed")
+    if "django" in generator.lower() or "csrftoken" in low:
+        add("Django", "Marker found in page or generator")
+    if "rails" in generator.lower() or "phusion passenger" in server_low:
+        add("Ruby on Rails", "Marker found in page or headers")
+    if "laravel" in low or "laravel_session" in low:
+        add("Laravel", "Marker found in page")
+    if "symfony" in low or "symfony" in powered.lower():
+        add("Symfony", "Marker found in page or headers")
+    if "codeigniter" in low:
+        add("CodeIgniter", "Marker found in page")
+    if "cakephp" in low:
+        add("CakePHP", "Marker found in page")
+    if "yii.js" in low:
+        add("Yii", "Marker found in page")
+    if "flask" in low and ("flask" in powered.lower() or "werkzeug" in low):
+        add("Flask", "Marker found in page or headers")
+    if "fastapi" in low or "fastapi" in powered.lower():
+        add("FastAPI", "Marker found in page or headers")
+    if "express" in powered.lower() or "express" in server_low:
+        add("Express.js", "Marker found in headers")
+    if "next.js" in low or "__next" in low or "next/router" in low:
+        add("Next.js", "Marker found in page")
+    if "nuxt" in low or "__nuxt" in low:
+        add("Nuxt.js", "Marker found in page")
+    if "gatsby" in low or "gatsby-" in low:
+        add("Gatsby", "Marker found in page")
+    if "remix" in low and ("remix.run" in low or "__remix" in low):
+        add("Remix", "Marker found in page")
+    if "astro" in generator.lower() or "astro-" in low:
+        add("Astro", "Marker found in page or generator")
+    if "svelte" in low and ("svelte-" in low or "sveltekit" in low):
+        add("Svelte", "Marker found in page")
+    if "alpine.js" in low or "x-data" in low:
+        add("Alpine.js", "Marker found in page")
+    if "htmx" in low:
+        add("htmx", "Marker found in page")
+    if "tailwind" in low:
+        add("Tailwind CSS", "Marker found in page")
+    if "bootstrap" in low:
+        version = extract_version(low, r"bootstrap[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)")
+        if version:
+            add("Bootstrap " + version, "Stylesheet or script observed")
+        else:
+            add("Bootstrap", "Marker found in page")
+    if "bulma" in low:
+        add("Bulma", "Marker found in page")
+    if "foundation" in low and "foundation.min" in low:
+        add("Foundation", "Marker found in page")
+    if "materialize" in low:
+        add("Materialize", "Marker found in page")
+    if "antd" in low or "ant-design" in low:
+        add("Ant Design", "Marker found in page")
+    if "mui" in low and ("mui-" in low or "@mui" in low):
+        add("Material UI", "Marker found in page")
+    if "chakra" in low and "chakra-" in low:
+        add("Chakra UI", "Marker found in page")
+    if "storybook" in low:
+        add("Storybook", "Marker found in page")
+    if "graphql" in low:
+        add("GraphQL", "Marker found in page")
+    if "apollo" in low and ("apollo-client" in low or "__apollo" in low):
+        add("Apollo", "Marker found in page")
+    if "firebase" in low:
+        add("Firebase", "Marker found in page")
+    if "supabase" in low:
+        add("Supabase", "Marker found in page")
+    if "amplify" in low and "aws-amplify" in low:
+        add("AWS Amplify", "Marker found in page")
+    if "contentful" in low:
+        add("Contentful", "Marker found in page")
+    if "sanity.io" in low:
+        add("Sanity", "Marker found in page")
+    if "strapi" in low:
+        add("Strapi", "Marker found in page")
+    if "hugo" in generator.lower():
+        add("Hugo", "Declared in meta generator")
+    if "jekyll" in generator.lower():
+        add("Jekyll", "Declared in meta generator")
+    if "typo3" in generator.lower():
+        add("TYPO3", "Declared in meta generator")
+    if "webflow" in generator.lower() or "webflow" in low:
+        add("Webflow", "Marker found in page or generator")
+    if "wix.com" in low or "wixstatic" in low:
+        add("Wix", "Marker found in page")
+    if "squarespace" in low:
+        add("Squarespace", "Marker found in page")
+    if "weebly" in low:
+        add("Weebly", "Marker found in page")
+    if "shopify" in low:
+        add("Shopify", "Marker found in page")
+    if "magento" in low or "mage/" in low:
+        add("Magento", "Marker found in page")
+    if "woocommerce" in low:
+        add("WooCommerce", "Marker found in page")
+    if "prestashop" in low:
+        add("PrestaShop", "Marker found in page")
+    if "opencart" in low:
+        add("OpenCart", "Marker found in page")
+    if "bigcommerce" in low:
+        add("BigCommerce", "Marker found in page")
+    if "salesforce" in low and ("commercecloud" in low or "demandware" in low):
+        add("Salesforce Commerce", "Marker found in page")
+    if "discourse" in low:
+        add("Discourse", "Marker found in page")
+    if "phpbb" in low:
+        add("phpBB", "Marker found in page")
+    if "vbulletin" in low:
+        add("vBulletin", "Marker found in page")
+    if "xenforo" in low:
+        add("XenForo", "Marker found in page")
+    if "mediawiki" in generator.lower():
+        add("MediaWiki", "Declared in meta generator")
+    if "dokuwiki" in low:
+        add("DokuWiki", "Marker found in page")
+    if "confluence" in low:
+        add("Confluence", "Marker found in page")
+    if "sharepoint" in low:
+        add("SharePoint", "Marker found in page")
+    if "_debug_toolbar" in low:
+        add("Django Debug Toolbar", "Debug toolbar exposed in page")
+    if "webpack" in low:
+        add("webpack", "Bundler marker found in page")
+    if "vite" in low and ("/@vite/" in low or "vite.svg" in low):
+        add("Vite", "Bundler marker found in page")
+    if "parcel" in low and "parcel-require" in low:
+        add("Parcel", "Bundler marker found in page")
+    if "rollup" in low and "rollup-" in low:
+        add("Rollup", "Bundler marker found in page")
+    if "ember" in low and ("ember-" in low or "vendor/ember" in low):
+        add("Ember.js", "Marker found in page")
+    if "backbone" in low and "backbone-min" in low:
+        add("Backbone.js", "Marker found in page")
+    if "knockout" in low:
+        add("Knockout.js", "Marker found in page")
+    if "lodash" in low:
+        version = extract_version(low, r"lodash[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)")
+        if version:
+            add("Lodash " + version, "Library observed")
+        else:
+            add("Lodash", "Marker found in page")
+    if "moment.js" in low or "moment.min.js" in low:
+        add("Moment.js", "Library observed")
+    if "d3.js" in low or "d3.min.js" in low:
+        add("D3.js", "Library observed")
+    if "chart.js" in low or "chart.min.js" in low:
+        add("Chart.js", "Library observed")
+    if "three.js" in low or "three.min.js" in low:
+        add("Three.js", "Library observed")
+    if "leaflet" in low:
+        add("Leaflet", "Map library observed")
+    if "mapbox" in low:
+        add("Mapbox", "Map library observed")
+    if "openlayers" in low:
+        add("OpenLayers", "Map library observed")
+    if "ckeditor" in low:
+        add("CKEditor", "Editor observed")
+    if "tinymce" in low:
+        add("TinyMCE", "Editor observed")
+    if "monaco" in low and "monaco-editor" in low:
+        add("Monaco Editor", "Editor observed")
+    if "recaptcha" in low:
+        add("reCAPTCHA", "Captcha observed")
+    if "hcaptcha" in low:
+        add("hCaptcha", "Captcha observed")
+    if "cloudflare" in low and ("turnstile" in low or "cf_chl" in low):
+        add("Cloudflare challenge", "Challenge marker found in page")
+    if "datadome" in low:
+        add("DataDome", "Bot protection marker found")
+    if "perimeterx" in low or "px-captcha" in low:
+        add("PerimeterX", "Bot protection marker found")
+    if "akamai" in low and ("sensor" in low or "_abck" in low):
+        add("Akamai Bot Manager", "Bot protection marker found")
+    if "cookielaw" in low or "onetrust" in low:
+        add("OneTrust", "Consent manager observed")
+    if "cookiebot" in low:
+        add("Cookiebot", "Consent manager observed")
+    if "trustarc" in low:
+        add("TrustArc", "Consent manager observed")
+    if "newrelic" in low:
+        add("New Relic", "Monitoring marker found")
+    if "sentry" in low and ("sentry.io" in low or "@sentry" in low):
+        add("Sentry", "Error tracking observed")
+    if "bugsnag" in low:
+        add("Bugsnag", "Error tracking observed")
+    if "hotjar" in low:
+        add("Hotjar", "Analytics marker found")
+    if "fullstory" in low:
+        add("FullStory", "Analytics marker found")
+    if "mixpanel" in low:
+        add("Mixpanel", "Analytics marker found")
+    if "amplitude" in low:
+        add("Amplitude", "Analytics marker found")
+    if "segment.io" in low or "segment.com" in low:
+        add("Segment", "Analytics marker found")
+    if "optimizely" in low:
+        add("Optimizely", "Experimentation marker found")
+    if "crazyegg" in low:
+        add("Crazy Egg", "Analytics marker found")
+    if "criteo" in low:
+        add("Criteo", "Ad marker found")
+    if "taboola" in low:
+        add("Taboola", "Ad marker found")
+    if "outbrain" in low:
+        add("Outbrain", "Ad marker found")
+    if "doubleclick" in low or "googlesyndication" in low:
+        add("Google Ads", "Ad marker found")
     return found
