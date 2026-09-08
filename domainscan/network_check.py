@@ -1,0 +1,147 @@
+import socket
+
+from domainscan.helpers import BROWSER_UA
+
+
+IPAPI_FIELDS = "status,message,continent,continentCode,country,countryCode,region,regionName,city,district,zip,lat,lon,timezone,offset,currency,isp,org,as,asname,reverse,mobile,proxy,hosting,query"
+
+
+def collect(ips):
+    rows = []
+    unique = []
+    for ip in ips or []:
+        if ip and ip not in unique:
+            unique.append(ip)
+    if not unique:
+        rows.append(("IP addresses", "None resolved"))
+        return {"rows": rows}
+    rows.append(("IP address count", str(len(unique))))
+    shown = unique[:6]
+    if len(unique) > 6:
+        rows.append(("IP note", "Showing first 6 of " + str(len(unique))))
+    for index, ip in enumerate(shown, 1):
+        rows.extend(describe_ip(ip, index))
+    return {"rows": rows}
+
+
+def reverse_dns(ip):
+    try:
+        name, _, _ = socket.gethostbyaddr(ip)
+        return name
+    except Exception:
+        return ""
+
+
+def describe_ip(ip, index):
+    prefix = "IP " + str(index) + " "
+    rows = []
+    rows.append((prefix + "address", ip))
+    if ":" in ip:
+        rows.append((prefix + "version", "IPv6"))
+    else:
+        rows.append((prefix + "version", "IPv4"))
+    reverse = reverse_dns(ip)
+    if reverse:
+        rows.append((prefix + "reverse DNS", reverse))
+        if ":" not in ip:
+            try:
+                forward = socket.gethostbyname(reverse)
+                if forward == ip:
+                    rows.append((prefix + "forward confirm", "Matches (" + forward + ")"))
+                else:
+                    rows.append((prefix + "forward confirm", "Mismatch, forward resolves to " + forward))
+            except Exception:
+                rows.append((prefix + "forward confirm", "Reverse name does not resolve forward"))
+    else:
+        rows.append((prefix + "reverse DNS", "No PTR record"))
+    geo, source = lookup_geo(ip)
+    if not geo:
+        rows.append((prefix + "geolocation", "Lookup failed"))
+        return rows
+    rows.append((prefix + "geo source", source))
+    mapping = [
+        ("continent", "continent"),
+        ("country", "country"),
+        ("countryCode", "country code"),
+        ("regionName", "region"),
+        ("region", "region code"),
+        ("city", "city"),
+        ("district", "district"),
+        ("zip", "postal code"),
+        ("lat", "latitude"),
+        ("lon", "longitude"),
+        ("timezone", "timezone"),
+        ("currency", "currency"),
+        ("isp", "ISP"),
+        ("org", "organization"),
+        ("as", "ASN"),
+        ("asname", "AS name"),
+        ("mobile", "mobile network"),
+        ("proxy", "proxy or VPN"),
+        ("hosting", "hosting range"),
+    ]
+    for key, label in mapping:
+        value = geo.get(key, "")
+        if value == "" or value is None:
+            continue
+        if isinstance(value, bool):
+            if value:
+                value = "Yes"
+            else:
+                value = "No"
+        rows.append((prefix + label, str(value)))
+    return rows
+
+
+def lookup_geo(ip):
+    try:
+        import requests
+        url = "http://ip-api.com/json/" + ip
+        params = {"fields": IPAPI_FIELDS}
+        headers = {"User-Agent": BROWSER_UA}
+        response = requests.get(url, params=params, headers=headers, timeout=8)
+        data = response.json()
+        if data.get("status") == "success":
+            return data, "ip-api.com"
+    except Exception:
+        pass
+    try:
+        import requests
+        headers = {"User-Agent": BROWSER_UA}
+        response = requests.get("https://ipwho.is/" + ip, headers=headers, timeout=8)
+        data = response.json()
+        if data.get("success") is False:
+            return None, ""
+        return normalize_ipwho(data), "ipwho.is"
+    except Exception:
+        pass
+    return None, ""
+
+
+def normalize_ipwho(data):
+    connection = data.get("connection", {}) or {}
+    timezone = data.get("timezone", {}) or {}
+    asn = connection.get("asn", "")
+    if isinstance(timezone, dict):
+        zone = timezone.get("id", "")
+    else:
+        zone = str(timezone)
+    if asn:
+        asn_text = "AS" + str(asn)
+    else:
+        asn_text = ""
+    return {
+        "continent": data.get("continent", ""),
+        "country": data.get("country", ""),
+        "countryCode": data.get("country_code", ""),
+        "regionName": data.get("region", ""),
+        "city": data.get("city", ""),
+        "zip": data.get("postal", ""),
+        "lat": data.get("latitude", ""),
+        "lon": data.get("longitude", ""),
+        "timezone": zone,
+        "isp": connection.get("isp", ""),
+        "org": connection.get("org", ""),
+        "as": asn_text,
+        "asname": connection.get("domain", ""),
+    }
