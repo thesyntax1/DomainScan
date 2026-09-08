@@ -1,5 +1,7 @@
 import socket
 
+from domainscan.helpers import short
+
 try:
     import dns.resolver
     import dns.exception
@@ -138,6 +140,111 @@ def parse_caa(records):
         rows.append(("CAA policy " + str(count), tag + " " + value + " (flags " + parts[0] + ")"))
     if count:
         rows.append(("CAA restricts issuance", "Yes (" + str(count) + " policies)"))
+        rows.extend(caa_detail_rows(records))
+    return rows
+
+
+def caa_detail_rows(records):
+    rows = []
+    tags = {}
+    critical = 0
+    for record in records:
+        parts = record.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            flags = int(parts[0])
+        except Exception:
+            flags = 0
+        if flags & 128:
+            critical += 1
+        tags.setdefault(parts[1].lower(), []).append(parts[2].strip().strip('"'))
+    if "issuewild" not in tags and "issue" in tags:
+        rows.append(("CAA wildcards", "No issuewild tag (issue rules also cover wildcards)"))
+    elif "issuewild" in tags:
+        rows.append(("CAA wildcards", "Restricted: " + short(", ".join(tags["issuewild"][:3]), 160)))
+    if "issuemail" in tags or "issuevmc" in tags:
+        rows.append(("CAA mail/VMC", "S/MIME or VMC issuance restricted"))
+    if "validationmethods" in tags:
+        rows.append(("CAA validation", short(", ".join(tags["validationmethods"][:4]), 160)))
+    if "accounturi" in tags:
+        rows.append(("CAA accounts", str(len(tags["accounturi"])) + " ACME account bindings"))
+    if critical:
+        rows.append(("CAA critical flag", str(critical) + " records marked critical (unknown tags must fail closed)"))
+    return rows
+
+
+def ds_link_rows(resolver, zone):
+    rows = []
+    if not HAS_DNSPYTHON:
+        return rows
+    import dns.dnssec
+    import dns.rdatatype
+    try:
+        ds_answer = resolver.resolve(zone, dns.rdatatype.DS, lifetime=6)
+        key_answer = resolver.resolve(zone, dns.rdatatype.DNSKEY, lifetime=6)
+    except Exception:
+        return rows
+    ds_digests = set()
+    for rdata in ds_answer:
+        try:
+            ds_digests.add(bytes(rdata.digest).hex().lower())
+        except Exception:
+            continue
+    if not ds_digests:
+        return rows
+    matched = False
+    checked = 0
+    for key in key_answer:
+        for ds in ds_answer:
+            checked += 1
+            try:
+                candidate = dns.dnssec.make_ds(ds_answer.canonical_name, key, str(ds.digest_type))
+            except Exception:
+                continue
+            if bytes(candidate.digest).hex().lower() in ds_digests and int(candidate.key_tag) == int(ds.key_tag):
+                matched = True
+                break
+        if matched:
+            break
+    if not checked:
+        return rows
+    if matched:
+        rows.append(("DS linkage", "Verified (a DS digest matches a published DNSKEY)"))
+    else:
+        rows.append(("DS linkage", "BROKEN (no DS digest matches any DNSKEY)"))
+    return rows
+
+
+def rrsig_expiry_rows(resolver, zone):
+    rows = []
+    if not HAS_DNSPYTHON:
+        return rows
+    import datetime
+    import dns.rdatatype
+    try:
+        answer = resolver.resolve(zone, dns.rdatatype.RRSIG, lifetime=6)
+    except Exception:
+        return rows
+    expiries = []
+    for rdata in answer:
+        try:
+            stamp = datetime.datetime.fromtimestamp(rdata.expiration, datetime.timezone.utc)
+            expiries.append((dns.rdatatype.to_text(rdata.type_covered), stamp))
+        except Exception:
+            continue
+    if not expiries:
+        return rows
+    expiries.sort(key=lambda item: item[1])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    nearest_kind, nearest = expiries[0]
+    days = (nearest - now).days
+    if days < 0:
+        rows.append(("RRSIG expiry", "EXPIRED signatures present (" + nearest_kind + " lapsed " + str(abs(days)) + " days ago)"))
+    elif days < 7:
+        rows.append(("RRSIG expiry", nearest_kind + " signatures expire in " + str(days) + " days (re-sign soon)"))
+    else:
+        rows.append(("RRSIG expiry", "Signatures valid, earliest expiry " + nearest.strftime("%Y-%m-%d") + " (" + str(days) + " days)"))
     return rows
 
 
@@ -433,6 +540,43 @@ def adbit_query(ip, name):
         return None
 
 
+def nsec_walk_rows(resolver, zone, cap=40):
+    rows = []
+    if not HAS_DNSPYTHON:
+        return rows
+    import dns.rdatatype
+    names = []
+    current = zone.rstrip(".") + "."
+    seen = {current.lower()}
+    try:
+        for _ in range(cap):
+            answer = resolver.resolve(current, dns.rdatatype.NSEC, lifetime=5)
+            found = None
+            for rdata in answer:
+                nxt = str(rdata.next).rstrip(".") + "."
+                if nxt.lower().endswith(zone.rstrip(".").lower() + ".") or nxt.lower() == zone.rstrip(".").lower() + ".":
+                    found = nxt
+                    break
+                if found is None:
+                    found = nxt
+            if found is None:
+                break
+            if found.lower() in seen:
+                break
+            seen.add(found.lower())
+            names.append(found.rstrip("."))
+            current = found
+    except Exception:
+        pass
+    if names:
+        rows.append(("NSEC walk", str(len(names)) + " names enumerated (zone is walkable)"))
+        for index, name in enumerate(names[:12], 1):
+            rows.append(("Walked name " + str(index), name))
+    else:
+        rows.append(("NSEC walk", "Could not walk (server refused or walk wrapped)"))
+    return rows
+
+
 def nsec_mode_rows(nsec, nsec3):
     rows = []
     if nsec:
@@ -635,11 +779,22 @@ def collect(host, apex):
         nsec3 = query_type(resolver, host, "NSEC3PARAM", rows, "")
         nsec = query_type(resolver, host, "NSEC", rows, "")
     rows.extend(nsec_mode_rows(nsec, nsec3))
+    if nsec:
+        if apex and apex != host:
+            rows.extend(nsec_walk_rows(resolver, apex))
+        else:
+            rows.extend(nsec_walk_rows(resolver, host))
     rows.extend(parse_soa(data["soa_apex"] or data["soa"]))
     rows.extend(soa_timer_rows(data["soa_apex"] or data["soa"]))
     rows.extend(parse_caa(data["caa_apex"] or data["caa"]))
     rows.extend(parse_ds(data["ds"]))
     rows.extend(parse_dnskey(data["dnskey"]))
+    if apex and apex != host:
+        rows.extend(ds_link_rows(resolver, apex))
+        rows.extend(rrsig_expiry_rows(resolver, apex))
+    else:
+        rows.extend(ds_link_rows(resolver, host))
+        rows.extend(rrsig_expiry_rows(resolver, host))
     rows.extend(parse_tlsa(data["tlsa"]))
     rows.extend(parse_sshfp(data["sshfp"]))
     rows.extend(parse_srv(data["srv"]))

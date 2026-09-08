@@ -160,7 +160,124 @@ def collect(host, enabled=True):
     if any(item["port"] == 21 for item in opened):
         rows.append(("FTP anonymous", ftp_anonymous(host)))
     rows.append(("UDP port 53", udp_dns_probe(host)))
+    rows.append(("UDP port 123", ntp_probe(host)))
+    rows.append(("UDP port 1900", ssdp_probe(host)))
     return {"rows": rows}
+
+
+def ntp_probe(host, timeout=3):
+    packet = b"\x1b" + b"\x00" * 47
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        sock.sendto(packet, (host, 123))
+        data, _ = sock.recvfrom(512)
+    except socket.timeout:
+        return "Filtered (no UDP response)"
+    except ConnectionRefusedError:
+        return "Closed (port unreachable)"
+    except Exception as exc:
+        return "Probe failed (" + exc.__class__.__name__ + ")"
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    if len(data) < 48:
+        return "Filtered (short UDP reply)"
+    version = (data[0] >> 3) & 0x07
+    stratum = data[1]
+    detail = "Open (NTPv" + str(version) + ", stratum " + str(stratum) + ")"
+    if version <= 3:
+        detail = detail + " (old version, review)"
+    return detail
+
+
+def ssdp_probe(host, timeout=3):
+    message = ("M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+               "MAN: \"ns=01; ns=01\"\r\nMX: 1\r\nST: upnp:rootdevice\r\n\r\n").encode()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        sock.sendto(message, (host, 1900))
+        data, _ = sock.recvfrom(2048)
+    except socket.timeout:
+        return "Filtered (no UDP response)"
+    except ConnectionRefusedError:
+        return "Closed (port unreachable)"
+    except Exception as exc:
+        return "Probe failed (" + exc.__class__.__name__ + ")"
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    text = data[:300].decode("latin-1", "ignore")
+    if "200 OK" in text or "LOCATION" in text.upper():
+        server = ""
+        for line in text.splitlines():
+            if line.upper().startswith("SERVER:"):
+                server = line.split(":", 1)[1].strip()
+                break
+        detail = "Open (SSDP/UPnP answers, DDoS reflection risk)"
+        if server:
+            detail = detail + " [" + server[:80] + "]"
+        return detail
+    return "Filtered (unexpected UDP reply)"
+
+
+SERVICE_VULNS = [
+    ("vsftpd", "2.3.4", "Backdoored release (CVE-2011-2523, critical)", True),
+    ("OpenSSH", "7.4", "Below 7.4: user enumeration CVE-2018-15473 and older flaws"),
+    ("Dropbear", "2020.81", "Below 2020.81: review for past RCE advisories"),
+    ("Apache", "2.4.51", "Below 2.4.51: path traversal CVE-2021-41773/42013 if 2.4.49+"),
+    ("nginx", "1.20.0", "Below 1.20.0: DNS resolver flaw CVE-2021-23017 when resolver used"),
+    ("Exim", "4.94", "Below 4.94: RCE chain CVE-2020-28017 and related"),
+    ("Postfix", "3.4.0", "Very old release line, review for patches"),
+    ("ProFTPD", "1.3.6", "Below 1.3.6: mod_copy RCE CVE-2019-12815"),
+    ("Pure-FTPd", "1.0.50", "Below 1.0.50: review for past flaws"),
+    ("MySQL", "5.7.31", "Below 5.7.31 / 8.0.21: multiple Oracle CPU fixes missing"),
+    ("MariaDB", "10.4.14", "Below 10.4.14: multiple fixes missing"),
+    ("PostgreSQL", "12.4", "Below 12.4: review for past RCE advisories"),
+    ("Microsoft-IIS", "10.0", "IIS below 10: review for Ghost/DejaBlue-era patches"),
+    ("Squid", "4.11", "Below 4.11: request-smuggling and RCE fixes missing"),
+]
+
+
+def service_advisory(banner):
+    import re
+    low = (banner or "").lower()
+    for entry in SERVICE_VULNS:
+        product, fixed, note = entry[0], entry[1], entry[2]
+        exact = len(entry) > 3 and entry[3]
+        if product.lower() not in low:
+            continue
+        match = re.search(re.escape(product) + r"[_ /-]?(\d[\d.]*)", banner, re.IGNORECASE)
+        if not match:
+            return product + " version hidden (" + note.split(":")[0] + ")"
+        if exact:
+            if match.group(1) == fixed:
+                return product + " " + match.group(1) + ": " + note
+            return ""
+        if version_older(match.group(1), fixed):
+            return product + " " + match.group(1) + " is outdated: " + note
+        return ""
+    return ""
+
+
+def version_older(found, fixed):
+    def parts(text):
+        numbers = []
+        for chunk in str(text).split("."):
+            digits = "".join(char for char in chunk if char.isdigit())
+            numbers.append(int(digits) if digits else 0)
+        return numbers
+    left = parts(found)
+    right = parts(fixed)
+    size = max(len(left), len(right))
+    left = left + [0] * (size - len(left))
+    right = right + [0] * (size - len(right))
+    return left < right
 
 
 def banner_verdict(port, banner):
@@ -181,6 +298,9 @@ def banner_verdict(port, banner):
         match = re.search(r"(\d+\.\d+\.\d+)", banner)
         if match:
             rows.append(("MySQL version", match.group(1)))
+    advisory = service_advisory(banner)
+    if advisory:
+        rows.append(("Service advisory", advisory))
     return rows
 
 

@@ -69,6 +69,21 @@ PROBES = [
     ("/healthz", None, "low"),
     ("/v2/_catalog", "repositories", "medium"),
     ("/graphql", "query", "medium"),
+    ("/debug/pprof/", "profile", "medium"),
+    ("/swagger-ui.html", "swagger", "medium"),
+    ("/redoc", "redoc", "low"),
+    ("/api/redoc", "redoc", "low"),
+    ("/wp-content/debug.log", "PHP", "high"),
+    ("/debug.log", "error", "medium"),
+    ("/error_log", "PHP", "medium"),
+    ("/web.config", "configuration", "high"),
+    ("/server.xml", "Server", "high"),
+    ("/config/database.yml", "password", "critical"),
+    ("/.npmrc", "auth", "high"),
+    ("/package-lock.json", "\"name\"", "low"),
+    ("/Jenkinsfile", "pipeline", "medium"),
+    ("/myadmin/", "phpMyAdmin", "high"),
+    ("/pma/", "phpMyAdmin", "high"),
 ]
 
 

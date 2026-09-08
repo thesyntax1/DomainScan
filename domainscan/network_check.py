@@ -173,7 +173,63 @@ def describe_ip(ip, index):
         rows.append((prefix + label, str(value)))
     if geo.get("lat", "") != "" and geo.get("lon", "") != "":
         rows.append((prefix + "map", map_link(geo.get("lat"), geo.get("lon"))))
+    if index == 1:
+        rows.extend(second_source_rows(ip, geo, source, prefix))
     return rows
+
+
+def second_source_rows(ip, primary, source, prefix):
+    import requests
+    rows = []
+    try:
+        if source == "ip-api.com":
+            response = requests.get("https://ipwho.is/" + ip, headers={"User-Agent": BROWSER_UA}, timeout=8)
+            data = response.json()
+            if data.get("success") is False:
+                return rows
+            other = normalize_ipwho(data)
+            other_name = "ipwho.is"
+        else:
+            url = "http://ip-api.com/json/" + ip
+            response = requests.get(url, params={"fields": IPAPI_FIELDS}, headers={"User-Agent": BROWSER_UA}, timeout=8)
+            data = response.json()
+            if data.get("status") != "success":
+                return rows
+            other = data
+            other_name = "ip-api.com"
+    except Exception:
+        return rows
+    matches = 0
+    compared = 0
+    for key in ("countryCode", "as"):
+        first = str(primary.get(key, "") or "")
+        second = str(other.get(key, "") or "")
+        if not first or not second:
+            continue
+        compared += 1
+        if key == "as":
+            first = asn_number(first)
+            second = asn_number(second)
+        else:
+            first = first.upper().strip()
+            second = second.upper().strip()
+        if first and first == second:
+            matches += 1
+        else:
+            rows.append((prefix + "mismatch " + key, str(primary.get(key)) + " vs " + str(other.get(key)) + " (" + other_name + ")"))
+    if compared and matches == compared:
+        rows.append((prefix + "cross-check", "Country and ASN agree with " + other_name))
+    elif compared:
+        rows.append((prefix + "cross-check", "Sources disagree (see mismatch rows)"))
+    return rows
+
+
+def asn_number(text):
+    import re
+    match = re.search(r"(\d+)", str(text or ""))
+    if match:
+        return match.group(1)
+    return ""
 
 
 def lookup_geo(ip):

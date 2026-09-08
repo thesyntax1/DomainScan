@@ -20,6 +20,7 @@ def collect(info, apex, dns_data, web, whois_ns, timeout=8):
     if apex:
         rows.extend(spf_include_status(resolver, apex))
         rows.extend(dmarc_rua_status(resolver, apex))
+        rows.extend(preload_status_rows(apex, timeout))
         rows.extend(www_status(resolver, info, apex, timeout))
         mx_records = dns_data.get("mx_apex") or dns_data.get("mx") or []
         rows.extend(spf_mx_note(resolver, apex, mx_records))
@@ -180,6 +181,32 @@ def spf_include_status(resolver, apex):
             rows.append(("SPF include " + target, "Target publishes SPF"))
         else:
             rows.append(("SPF include " + target, "Target has no SPF (misconfigured)"))
+    return rows
+
+
+def preload_status_rows(apex, timeout):
+    import requests
+    rows = []
+    try:
+        response = requests.get("https://hstspreload.org/api/v2/status", params={"domain": apex}, timeout=timeout, headers={"User-Agent": "DomainScan"})
+        data = response.json()
+    except Exception:
+        rows.append(("HSTS preload list", "Status check failed"))
+        return rows
+    status = str(data.get("status", "")).lower()
+    if status == "preloaded":
+        rows.append(("HSTS preload list", "Listed (browsers force HTTPS, including subdomains)"))
+    elif status == "pending":
+        rows.append(("HSTS preload list", "Submission pending"))
+    elif status:
+        rows.append(("HSTS preload list", "Not listed (" + status + ")"))
+    else:
+        rows.append(("HSTS preload list", "Unknown response"))
+    errors = data.get("errors", []) or []
+    for error in errors[:3]:
+        summary = error.get("summary", "") if isinstance(error, dict) else str(error)
+        if summary:
+            rows.append(("Preload blocker", summary[:200]))
     return rows
 
 

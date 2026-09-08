@@ -27,7 +27,8 @@ def collect(host, apex, dns_data):
     if dns_check.HAS_DNSPYTHON:
         resolver = dns_check.make_resolver()
     rows.extend(describe_mx(mx_records, resolver))
-    rows.extend(describe_spf(txt_records))
+    spf_rows = describe_spf(txt_records, resolver, name)
+    rows.extend(spf_rows)
     if resolver is None:
         rows.append(("DMARC/DKIM", "Skipped (dnspython not installed)"))
         return {"rows": rows}
@@ -42,7 +43,27 @@ def collect(host, apex, dns_data):
         if len(bits) >= 2:
             mx_hosts.append(bits[1].rstrip(".").lower())
     rows.extend(describe_mta_sts_policy(name, mx_hosts=mx_hosts))
+    rows.extend(spoof_rows(spf_rows, rows))
     return {"rows": rows}
+
+
+def spoof_rows(spf_rows, all_rows):
+    rows = []
+    flat = {str(key).lower(): str(text) for key, text in list(spf_rows) + list(all_rows)}
+    spf = flat.get("spf default policy", "").lower()
+    dmarc = flat.get("dmarc policy", "").lower()
+    dkim = "dkim keys found" in flat
+    if "fail (strict)" in spf and "reject" in dmarc:
+        rows.append(("Spoofability", "Protected (strict SPF with DMARC reject)"))
+    elif "reject" in dmarc or "quarantine" in dmarc:
+        rows.append(("Spoofability", "Mostly protected (DMARC enforced, harden SPF to -all)"))
+    elif "monitor only" in dmarc or "softfail" in spf or "neutral" in spf:
+        rows.append(("Spoofability", "Spoofable (weak policy, upgrade to DMARC reject)"))
+    elif dkim:
+        rows.append(("Spoofability", "Spoofable (DKIM alone does not stop spoofing)"))
+    else:
+        rows.append(("Spoofability", "Easily spoofable (no effective authentication)"))
+    return rows
 
 
 def describe_mx(records, resolver=None):
@@ -353,7 +374,7 @@ def smtp_starttls(target, port=25):
             pass
 
 
-def describe_spf(txt_records):
+def describe_spf(txt_records, resolver=None, name=""):
     rows = []
     spf = [item for item in txt_records if item.lower().startswith("v=spf1")]
     if not spf:
@@ -387,6 +408,48 @@ def describe_spf(txt_records):
             meaning = {"+": "Pass (permissive)", "-": "Fail (strict)", "~": "SoftFail", "?": "Neutral"}.get(qualifier, "Pass")
             policy = meaning + " [" + token + "]"
     rows.append(("SPF default policy", policy))
+    if resolver is not None and name:
+        rows.extend(spf_chain_rows(resolver, name, tokens, value))
+    return rows
+
+
+def spf_chain_rows(resolver, name, tokens, value):
+    rows = []
+    targets = []
+    for token in tokens:
+        body = token[1:] if token[:1] in "+-~?" else token
+        low = body.lower()
+        if low.startswith("include:"):
+            targets.append(("include", body[8:]))
+        elif low.startswith("redirect="):
+            targets.append(("redirect", body[9:]))
+    if not targets:
+        return rows
+    seen = {name.lower()}
+    total = spf_lookups(tokens)
+    for kind, target in targets[:5]:
+        target = target.strip().rstrip(".")
+        if not target or target.lower() in seen:
+            rows.append(("SPF " + kind + " " + target, "Skipped (loop)"))
+            continue
+        seen.add(target.lower())
+        try:
+            result = dns_check.query(resolver, target, "TXT")
+            records = [dns_check.clean_txt(item) for item in result["records"]]
+        except Exception:
+            rows.append(("SPF " + kind + " " + short(target, 80), "DNS lookup failed"))
+            continue
+        nested = [item for item in records if item.lower().startswith("v=spf1")]
+        if not nested:
+            rows.append(("SPF " + kind + " " + short(target, 80), "Target has no SPF record (permerror)"))
+            continue
+        nested_tokens = nested[0].split()[1:]
+        nested_count = spf_lookups(nested_tokens)
+        total += nested_count
+        rows.append(("SPF " + kind + " " + short(target, 80), str(nested_count) + " further lookups, ends " + short(nested_tokens[-1] if nested_tokens else "?", 40)))
+    rows.append(("SPF total lookups", str(total) + " across chain (limit 10)"))
+    if total > 10:
+        rows.append(("SPF chain verdict", "Chain exceeds 10 lookups (receivers return permerror)"))
     return rows
 
 
@@ -605,10 +668,42 @@ def bimi_logo_rows(record):
             response = requests.get(url, timeout=8, headers={"User-Agent": BROWSER_UA}, stream=True)
             response.close()
         rows.append(("BIMI logo fetch", "HTTP " + str(response.status_code) + ", " + short(response.headers.get("Content-Type", "?"), 60)))
+        rows.extend(bimi_svg_rows(url))
     except Exception as exc:
         rows.append(("BIMI logo fetch", "Failed (" + exc.__class__.__name__ + ")"))
     if "a=" in record:
         rows.append(("BIMI authority", short(re.search(r"a=([^;\s]+)", record).group(1), 160)))
+    return rows
+
+
+def bimi_svg_rows(url):
+    import requests
+    from domainscan.helpers import BROWSER_UA
+    rows = []
+    try:
+        response = requests.get(url, timeout=8, headers={"User-Agent": BROWSER_UA})
+    except Exception:
+        return rows
+    if response.status_code != 200:
+        return rows
+    body = response.content or b""
+    rows.append(("BIMI logo size", str(len(body)) + " bytes"))
+    text = body[:4000].decode("utf-8", "ignore").lower()
+    if "<svg" not in text:
+        rows.append(("BIMI logo format", "Not an SVG document (invalid)"))
+        return rows
+    problems = []
+    if "<script" in text:
+        problems.append("contains script")
+    bare = re.sub(r'xmlns(?::\w+)?="[^"]*"', "", text)
+    if "http://" in bare:
+        problems.append("references plain HTTP")
+    if len(body) > 32768:
+        problems.append("over 32 KB profile limit")
+    if problems:
+        rows.append(("BIMI logo format", "SVG but " + ", ".join(problems)))
+    else:
+        rows.append(("BIMI logo format", "Valid SVG Tiny profile candidate"))
     return rows
 
 

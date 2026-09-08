@@ -1,3 +1,4 @@
+import re
 import urllib.parse
 
 from domainscan import dns_check
@@ -28,6 +29,8 @@ def collect(base_url, headers=None, timeout=10):
     rows.append(("IPv6 web", ipv6_web(host, base_url)))
     rows.extend(cdn_rows(headers or {}))
     rows.extend(redirect_rows(session, base_url, timeout))
+    rows.extend(client_redirect_rows(session, base_url, timeout))
+    rows.extend(websocket_rows(session, base_url, timeout))
     rows.extend(host_injection_rows(session, base_url, timeout))
     rows.extend(probe_404(session, base_url, timeout))
     rows.extend(sensitive_checks(session, base_url, timeout))
@@ -113,6 +116,75 @@ def preflight_rows(session, base_url, timeout):
         rows.append(("CORS preflight", detail))
     else:
         rows.append(("CORS preflight", "No preflight headers (HTTP " + str(response.status_code) + ")"))
+    return rows
+
+
+def client_redirect_rows(session, base_url, timeout):
+    rows = []
+    chain = []
+    url = base_url + "/"
+    seen = set()
+    for _ in range(3):
+        if url in seen:
+            break
+        seen.add(url)
+        try:
+            response = session.get(url, timeout=timeout, allow_redirects=False)
+            body = response.text or ""
+        except Exception:
+            break
+        target = ""
+        kind = ""
+        match = re.search(r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+content=["\']?\s*\d+\s*;\s*url=([^"\'>\s]+)', body, re.IGNORECASE)
+        if match:
+            target = match.group(1)
+            kind = "meta refresh"
+        if not target:
+            match = re.search(r"(?:window\.)?location(?:\.href)?\s*=\s*[\"']([^\"']+)[\"']", body)
+            if match and len(match.group(1)) < 300:
+                target = match.group(1)
+                kind = "JS redirect"
+        if not target:
+            break
+        absolute = urllib.parse.urljoin(url, target)
+        chain.append(kind + " to " + absolute)
+        url = absolute
+    if chain:
+        rows.append(("Client-side redirects", str(len(chain)) + " hops"))
+        for index, hop in enumerate(chain, 1):
+            rows.append(("Client redirect " + str(index), short(hop, 220)))
+    else:
+        rows.append(("Client-side redirects", "None (no meta or JS redirect on homepage)"))
+    return rows
+
+
+def websocket_rows(session, base_url, timeout):
+    rows = []
+    try:
+        response = session.get(base_url + "/socket.io/?EIO=4&transport=polling", timeout=timeout)
+        if response.status_code == 200 and "sid" in (response.text or ""):
+            rows.append(("Socket.IO", "Endpoint answers (check auth on namespaces)"))
+    except Exception:
+        pass
+    upgraded = []
+    for path in ("/", "/ws", "/socket", "/websocket"):
+        try:
+            response = session.get(base_url + path, timeout=timeout, headers={
+                "Connection": "Upgrade",
+                "Upgrade": "websocket",
+                "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                "Sec-WebSocket-Version": "13",
+            })
+        except Exception:
+            continue
+        if response.status_code == 101:
+            upgraded.append(path)
+    if upgraded:
+        rows.append(("WebSocket upgrade", "101 on " + ", ".join(upgraded) + " (review auth and origin checks)"))
+    else:
+        rows.append(("WebSocket upgrade", "No 101 answers on common paths"))
+    if not [row for row in rows if row[0] == "Socket.IO"]:
+        rows.append(("Socket.IO", "No endpoint found"))
     return rows
 
 
@@ -227,6 +299,30 @@ def waf_signature(headers, body):
         return "Vercel"
     if "x-sucuri-cache" in low_headers:
         return "Sucuri"
+    if "_px3" in low_body or "px-captcha" in low_body or "perimeterx" in low_body:
+        return "PerimeterX (HUMAN)"
+    if "datadome" in low_headers or "datadome" in low_body:
+        return "DataDome"
+    if "kasada" in low_headers or "kasada" in low_body or "x-kpsdk" in low_headers:
+        return "Kasada"
+    if "arkose" in low_body or "funcaptcha" in low_body:
+        return "Arkose Labs"
+    if "rbzid" in low_body or "reblaze" in low_body:
+        return "Reblaze"
+    if "naxsi" in low_headers or "naxsi" in low_body:
+        return "NAXSI"
+    if "sonicwall" in low_headers or "sonicwall" in low_body:
+        return "SonicWall"
+    if "x-sl-compstate" in low_headers or "radware" in low_body:
+        return "Radware"
+    if "ns_af" in low_body or "citrix" in low_headers:
+        return "Citrix ADC"
+    if "yunjiasu" in low_headers or "safedog" in low_headers or "safedog" in low_body:
+        return "Yunjiasu/Safedog"
+    if "stackpath" in low_headers or "server stgw" in low_headers:
+        return "StackPath"
+    if "x-ec-custom-error" in low_headers or "server ecd" in low_headers:
+        return "Edgecast"
     return ""
 
 

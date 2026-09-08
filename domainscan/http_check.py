@@ -153,7 +153,7 @@ def http_version(response):
 
 
 def parse_set_cookie(header):
-    info = {"name": "", "secure": False, "httponly": False, "samesite": "", "domain": "", "path": "", "persistent": False}
+    info = {"name": "", "secure": False, "httponly": False, "samesite": "", "domain": "", "path": "", "persistent": False, "partitioned": False}
     parts = (header or "").split(";")
     if parts:
         info["name"] = parts[0].split("=", 1)[0].strip()
@@ -175,6 +175,8 @@ def parse_set_cookie(header):
             info["path"] = attr.split("=", 1)[1].strip()
         elif low.startswith("expires=") or low.startswith("max-age="):
             info["persistent"] = True
+        elif low == "partitioned":
+            info["partitioned"] = True
     return info
 
 
@@ -225,6 +227,9 @@ def cookie_flag_rows(raw_cookies):
         rows.append(("Cookie flags: " + name, ", ".join(flags)))
     rows.append(("Cookies missing Secure", str(insecure)))
     rows.append(("Cookies missing HttpOnly", str(script_readable)))
+    partitioned = sum(1 for header in raw_cookies if parse_set_cookie(header)["partitioned"])
+    if partitioned:
+        rows.append(("Partitioned cookies", str(partitioned) + " use CHIPS isolation"))
     rows.extend(cookie_prefix_rows(raw_cookies))
     return rows
 
@@ -438,6 +443,18 @@ def security_summary(headers):
         rows.append(("CORS", "Allows " + short(cors, 120)))
     else:
         rows.append(("CORS", "No Access-Control-Allow-Origin header"))
+    endpoints = headers.get("Reporting-Endpoints", "")
+    if endpoints:
+        rows.append(("Reporting endpoints", short(endpoints, 220)))
+    nel = headers.get("NEL", "")
+    if nel:
+        rows.append(("Network Error Logging", short(nel, 220)))
+    document = headers.get("Document-Policy", "")
+    if document:
+        rows.append(("Document policy", short(document, 220)))
+    cluster = headers.get("Origin-Agent-Cluster", "")
+    if cluster:
+        rows.append(("Origin agent cluster", short(cluster, 120)))
     encoding = headers.get("Content-Encoding", "")
     if encoding:
         rows.append(("Compression", encoding))
@@ -567,13 +584,17 @@ def weak_cipher_probe(host, port=443, timeout=10):
     import subprocess
     if not shutil.which("openssl"):
         return []
-    try:
-        proc = subprocess.run(
-            ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-cipher", "LOW:EXP:eNULL:@STRENGTH"],
-            input="", capture_output=True, text=True, timeout=timeout)
-    except Exception:
-        return [("Weak ciphers", "Probe failed")]
-    return [("Weak ciphers", parse_weak_cipher_output((proc.stdout or "") + (proc.stderr or "")))]
+    rows = []
+    for label, cipher in (("Weak ciphers", "LOW:EXP:eNULL:@STRENGTH"), ("3DES offered", "3DES"), ("RC4 offered", "RC4")):
+        try:
+            proc = subprocess.run(
+                ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-cipher", cipher],
+                input="", capture_output=True, text=True, timeout=timeout)
+        except Exception:
+            rows.append((label, "Probe failed"))
+            continue
+        rows.append((label, parse_weak_cipher_output((proc.stdout or "") + (proc.stderr or ""))))
+    return rows
 
 
 def openssl_cert_text(host, port=443, timeout=10):

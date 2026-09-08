@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
+from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, grade_check, helpers, history_check, history_store, http_check, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -2268,3 +2268,249 @@ class PruneTests(unittest.TestCase):
             self.assertEqual(len(history_store.list_runs("example.com", directory=directory)), 2)
         finally:
             shutil.rmtree(directory, ignore_errors=True)
+
+
+class GradeTests(unittest.TestCase):
+    def good_result(self):
+        return {"sections": {
+            "Website": [("Security: HSTS", "Present: max-age=63072000"), ("HSTS max-age", "63072000 seconds"), ("Security: CSP", "Present: default-src"), ("CSP weaknesses", "None found"), ("Security: Clickjacking protection", "Present: DENY"), ("Cookies missing Secure", "0"), ("Cookies missing HttpOnly", "0"), ("Final URL", "https://example.com/"), ("Server version exposed", "No (nginx)"), ("Powered-By exposed", "No")],
+            "TLS": [("Certificate state", "Valid, 200 days remaining"), ("Chain trusted", "Yes (system certificate store)"), ("Legacy TLS", "TLS 1.0/1.1 not accepted"), ("Weak ciphers", "Rejected (good)")],
+            "Mail": [("SPF default policy", "Fail (strict) [-all]"), ("DMARC policy", "Reject (block)"), ("DKIM keys found", "2"), ("MTA-STS verdict", "Enforcing (unsigned mail rejected)")],
+            "DNS": [("DNSSEC", "Signed (DS/DNSKEY records published)"), ("CAA restricts issuance", "Yes (2 policies)")],
+            "Exposures": [("Exposed paths", "0")], "Subdomains": [], "Threat Intel": [], "Ports": [],
+            "Content": [("Mixed content refs", "None")]}}
+
+    def test_good_grade(self):
+        data = rows_to_dict(grade_check.collect(self.good_result())["rows"])
+        self.assertTrue(data["Security grade"].startswith("A"))
+
+    def test_bad_grade(self):
+        result = {"sections": {
+            "Website": [("Security: HSTS", "Missing"), ("Security: CSP", "Missing"), ("Security: Clickjacking protection", "Missing"), ("Cookies missing Secure", "4"), ("Final URL", "http://example.com/")],
+            "TLS": [("Certificate state", "Expired 5 days ago"), ("Chain trusted", "No: self signed"), ("Legacy TLS", "TLS 1.0/1.1 accepted (TLSv1, weak)"), ("Weak ciphers", "ACCEPTED: DES-CBC3-SHA (weak)")],
+            "Mail": [("SPF default policy", "No default policy"), ("DMARC policy", "Missing")],
+            "DNS": [("DNSSEC", "No DS/DNSKEY records found")],
+            "Exposures": [("CRITICAL: /.git/config", "x")], "Subdomains": [("Takeover 1", "x LIKELY TAKEABLE (Github error page)")],
+            "Threat Intel": [("urlscan.io verdicts", "2 malicious, 0 suspicious of 5")], "Ports": [("Risk: port 23", "Open, plaintext")], "Content": []}}
+        rows = grade_check.collect(result)["rows"]
+        data = rows_to_dict(rows)
+        self.assertTrue(data["Security grade"].startswith("F"))
+        self.assertIn("Top recommendation 1", data)
+
+    def test_letters(self):
+        self.assertEqual(grade_check.grade_letter(97), "A+")
+        self.assertEqual(grade_check.grade_letter(82), "B+")
+        self.assertEqual(grade_check.grade_letter(40), "F")
+
+
+class SpfChainTests(unittest.TestCase):
+    def test_chain_counts_nested(self):
+        mapping = {("_spf.example.net", "TXT"): ["v=spf1 ip4:192.0.2.0/24 ~all"]}
+        rows = mail_check.describe_spf(["v=spf1 include:_spf.example.net -all"], FakeResolver(mapping), "example.com")
+        data = rows_to_dict(rows)
+        self.assertIn("SPF include _spf.example.net", data)
+        self.assertIn("across chain", data["SPF total lookups"])
+
+    def test_chain_missing_target(self):
+        rows = mail_check.describe_spf(["v=spf1 include:gone.example.net -all"], FakeResolver({}), "example.com")
+        data = rows_to_dict(rows)
+        self.assertIn("permerror", data["SPF include gone.example.net"])
+
+    def test_chain_loop(self):
+        rows = mail_check.describe_spf(["v=spf1 include:example.com -all"], FakeResolver({}), "example.com")
+        data = rows_to_dict(rows)
+        self.assertIn("loop", data["SPF include example.com"])
+
+
+class SpoofTests(unittest.TestCase):
+    def test_protected(self):
+        data = rows_to_dict(mail_check.spoof_rows([("SPF default policy", "Fail (strict) [-all]")], [("DMARC policy", "Reject (block)")]))
+        self.assertIn("Protected", data["Spoofability"])
+
+    def test_spoofable(self):
+        data = rows_to_dict(mail_check.spoof_rows([("SPF default policy", "No default policy")], [("DMARC", "No DMARC record")]))
+        self.assertIn("Easily spoofable", data["Spoofability"])
+
+
+class BimiSvgTests(unittest.TestCase):
+    def test_valid_svg(self):
+        from unittest import mock
+
+        class FakeResponse:
+            status_code = 200
+            content = b'<svg xmlns="http://www.w3.org/2000/svg" width="100"></svg>'
+
+        with mock.patch("requests.get", return_value=FakeResponse()):
+            data = rows_to_dict(mail_check.bimi_svg_rows("https://example.com/logo.svg"))
+        self.assertIn("Valid SVG", data["BIMI logo format"])
+
+    def test_not_svg(self):
+        from unittest import mock
+
+        class FakeResponse:
+            status_code = 200
+            content = b"\x89PNG not svg"
+
+        with mock.patch("requests.get", return_value=FakeResponse()):
+            data = rows_to_dict(mail_check.bimi_svg_rows("https://example.com/logo.svg"))
+        self.assertIn("Not an SVG", data["BIMI logo format"])
+
+
+class PreloadTests(unittest.TestCase):
+    def test_listed(self):
+        from unittest import mock
+
+        class FakeResponse:
+            def json(self):
+                return {"status": "preloaded"}
+
+        with mock.patch("requests.get", return_value=FakeResponse()):
+            data = rows_to_dict(cross_check.preload_status_rows("example.com", 5))
+        self.assertIn("Listed", data["HSTS preload list"])
+
+    def test_failed(self):
+        from unittest import mock
+        with mock.patch("requests.get", side_effect=RuntimeError("down")):
+            data = rows_to_dict(cross_check.preload_status_rows("example.com", 5))
+        self.assertIn("failed", data["HSTS preload list"])
+
+
+class HeaderExtraTests(unittest.TestCase):
+    def test_new_headers(self):
+        headers = {"Reporting-Endpoints": "default=/r", "NEL": '{"report_to":"default"}', "Document-Policy": "js-profiling=?0", "Origin-Agent-Cluster": "?1"}
+        data = rows_to_dict(http_check.security_summary(headers))
+        self.assertIn("/r", data["Reporting endpoints"])
+        self.assertIn("report_to", data["Network Error Logging"])
+        self.assertIn("js-profiling", data["Document policy"])
+        self.assertEqual(data["Origin agent cluster"], "?1")
+
+    def test_partitioned(self):
+        data = rows_to_dict(http_check.cookie_flag_rows(["id=1; Secure; Partitioned; Path=/"]))
+        self.assertIn("CHIPS", data["Partitioned cookies"])
+
+
+class DnssecExtraTests(unittest.TestCase):
+    def test_caa_details(self):
+        data = rows_to_dict(dns_check.caa_detail_rows(['0 issue "letsencrypt.org"', '128 validationmethods "dns-01"']))
+        self.assertIn("issue rules also cover", data["CAA wildcards"])
+        self.assertEqual(data["CAA validation"], "dns-01")
+        self.assertIn("critical", data["CAA critical flag"])
+
+    def test_rrsig_no_answer(self):
+        self.assertEqual(dns_check.rrsig_expiry_rows(FakeResolver({}), "example.com"), [])
+        self.assertEqual(dns_check.ds_link_rows(FakeResolver({}), "example.com"), [])
+
+
+class SubdomainSourceTests(unittest.TestCase):
+    def test_otx(self):
+        from unittest import mock
+
+        class FakeResponse:
+            def json(self):
+                return {"passive_dns": [{"hostname": "a.example.com"}, {"hostname": "other.net"}]}
+
+        with mock.patch("requests.get", return_value=FakeResponse()):
+            self.assertEqual(subdomain_check.fetch_otx("example.com"), {"a.example.com"})
+
+    def test_anubis(self):
+        from unittest import mock
+
+        class FakeResponse:
+            def json(self):
+                return ["b.example.com", "x.other.net"]
+
+        with mock.patch("requests.get", return_value=FakeResponse()):
+            self.assertEqual(subdomain_check.fetch_anubis("example.com"), {"b.example.com"})
+
+    def test_failures(self):
+        from unittest import mock
+        with mock.patch("requests.get", side_effect=RuntimeError("down")):
+            self.assertIsNone(subdomain_check.fetch_otx("example.com"))
+            self.assertIsNone(subdomain_check.fetch_anubis("example.com"))
+
+    def test_takeover_markers(self):
+        self.assertGreaterEqual(len(subdomain_check.TAKEOVER_BODIES), 50)
+        self.assertEqual(subdomain_check.match_takeover_body("This UserVoice subdomain is currently available!"), "Uservoice")
+
+
+class ServiceAdvisoryTests(unittest.TestCase):
+    def test_openssh_old(self):
+        self.assertIn("CVE-2018-15473", ports_check.service_advisory("SSH-2.0-OpenSSH_7.2"))
+
+    def test_vsftpd_backdoor(self):
+        self.assertIn("CVE-2011-2523", ports_check.service_advisory("220 (vsFTPd 2.3.4)"))
+
+    def test_current_clean(self):
+        self.assertEqual(ports_check.service_advisory("SSH-2.0-OpenSSH_9.3"), "")
+        self.assertEqual(ports_check.service_advisory("220 (vsFTPd 3.0.3)"), "")
+
+    def test_version_compare(self):
+        self.assertTrue(ports_check.version_older("2.4.49", "2.4.51"))
+        self.assertFalse(ports_check.version_older("9.3", "7.4"))
+
+    def test_udp_closed(self):
+        self.assertEqual(ports_check.ntp_probe("127.0.0.1", timeout=1), "Filtered (no UDP response)")
+
+
+class WaybackDiffTests(unittest.TestCase):
+    def test_drift_same(self):
+        old = "<html><head><title>Acme</title></head><body><p>We sell quality widgets and gadgets online daily</p></body></html>"
+        new = "<html><head><title>Acme</title></head><body><p>We sell quality widgets and gadgets online daily with shipping</p></body></html>"
+        self.assertIn("nearly identical", wayback_check.drift_verdict(old, new))
+
+    def test_drift_changed(self):
+        old = "<html><head><title>Acme</title></head><body><p>We sell quality widgets and gadgets online daily</p></body></html>"
+        new = "<html><head><title>Casino</title></head><body><p>crypto betting poker slots jackpot win money now</p></body></html>"
+        verdict = wayback_check.drift_verdict(old, new)
+        self.assertIn("title changed", verdict)
+        self.assertIn("completely different", verdict)
+
+
+class GeoCrossTests(unittest.TestCase):
+    def test_agree(self):
+        from unittest import mock
+
+        class FakeResponse:
+            def json(self):
+                return {"success": True, "country_code": "US", "connection": {"asn": 15169}}
+
+        primary = {"countryCode": "US", "as": "AS15169 Google LLC"}
+        with mock.patch("requests.get", return_value=FakeResponse()):
+            data = rows_to_dict(network_check.second_source_rows("8.8.8.8", primary, "ip-api.com", "IP 1 "))
+        self.assertIn("agree", data["IP 1 cross-check"])
+
+    def test_disagree(self):
+        from unittest import mock
+
+        class FakeResponse:
+            def json(self):
+                return {"success": True, "country_code": "DE", "connection": {"asn": 3320}}
+
+        primary = {"countryCode": "US", "as": "AS15169 Google LLC"}
+        with mock.patch("requests.get", return_value=FakeResponse()):
+            data = rows_to_dict(network_check.second_source_rows("8.8.8.8", primary, "ip-api.com", "IP 1 "))
+        self.assertIn("disagree", data["IP 1 cross-check"])
+
+
+class TechWafTests(unittest.TestCase):
+    def test_new_tech(self):
+        rows = content_check.detect_tech('<script src="htmx.min.js"></script><script>supabase.createClient()</script>', {}, [], {})
+        data = rows_to_dict(rows)
+        self.assertIn("Tech: htmx", data)
+        self.assertIn("Tech: Supabase", data)
+
+    def test_new_waf(self):
+        self.assertEqual(web_extra_check.waf_signature({"Server": "nginx"}, "blocked _px3"), "PerimeterX (HUMAN)")
+        self.assertEqual(web_extra_check.waf_signature({"X-SL-CompState": "1"}, ""), "Radware")
+        self.assertEqual(web_extra_check.waf_signature({"Server": "x"}, "naxsi blocked"), "NAXSI")
+
+    def test_exposure_count(self):
+        self.assertGreaterEqual(len(exposure_check.PROBES), 75)
+
+
+class GradeSectionTests(unittest.TestCase):
+    def test_grade_in_scan(self):
+        result = scanner.run_scan("http://127.0.0.1:9/", include_ports=False, include_subdomains=False, timeout=2, crawl_pages=0, js_files=0, subdomain_web=0, include_recon=False)
+        self.assertIn("Grade", result["sections"])
+        data = rows_to_dict(result["sections"]["Grade"])
+        self.assertIn("Security grade", data)

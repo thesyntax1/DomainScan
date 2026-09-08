@@ -3,7 +3,7 @@ import urllib.parse
 from domainscan.helpers import BROWSER_UA, short
 
 
-def collect(host, timeout=10):
+def collect(host, timeout=10, current_html=""):
     rows = []
     if not host:
         rows.append(("Web archive", "No host to query"))
@@ -18,7 +18,72 @@ def collect(host, timeout=10):
         return {"rows": rows}
     rows.extend(summarize(captures))
     rows.extend(subdomain_rows(host, timeout))
+    if current_html:
+        rows.extend(homepage_diff_rows(host, current_html, timeout))
     return {"rows": rows}
+
+
+def homepage_diff_rows(host, current_html, timeout):
+    import re
+    import requests
+    rows = []
+    params = {
+        "url": host + "/",
+        "output": "json",
+        "fl": "timestamp,original",
+        "filter": "statuscode:200",
+        "limit": 1,
+    }
+    try:
+        response = requests.get("https://web.archive.org/cdx/search/cdx", params=params, headers={"User-Agent": BROWSER_UA}, timeout=timeout)
+        data = response.json()
+    except Exception:
+        return rows
+    if not data or len(data) < 2:
+        return rows
+    stamp = data[1][0]
+    try:
+        old = requests.get("https://web.archive.org/web/" + stamp + "id_/" + data[1][1], headers={"User-Agent": BROWSER_UA}, timeout=timeout)
+        old_html = old.text or ""
+    except Exception:
+        return rows
+    if not old_html:
+        return rows
+    rows.append(("Oldest homepage", format_stamp(stamp)))
+    rows.append(("Homepage drift", drift_verdict(old_html, current_html or "")))
+    return rows
+
+
+def drift_verdict(old_html, new_html):
+    import re
+    def words(html):
+        text = re.sub(r"<script.*?</script>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<style.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"<[^>]+>", " ", text)
+        return set(word.lower() for word in re.findall(r"[a-z0-9]{3,}", text) if len(word) < 30)
+    def title(html):
+        match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        if match:
+            return re.sub(r"\s+", " ", match.group(1)).strip()
+        return ""
+    old_title = title(old_html)
+    new_title = title(new_html)
+    if old_title and new_title and old_title != new_title:
+        changed = "title changed"
+    elif old_title or new_title:
+        changed = "title kept"
+    else:
+        changed = "no titles"
+    before = words(old_html)
+    after = words(new_html)
+    if not before or not after:
+        return changed + " (word comparison unavailable)"
+    overlap = len(before & after) / max(len(before | after), 1)
+    if overlap > 0.7:
+        return changed + ", content nearly identical (" + str(int(overlap * 100)) + "% word overlap)"
+    if overlap > 0.3:
+        return changed + ", content partly rewritten (" + str(int(overlap * 100)) + "% word overlap)"
+    return changed + ", content completely different (" + str(int(overlap * 100)) + "% word overlap)"
 
 
 def subdomain_rows(host, timeout):

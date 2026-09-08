@@ -47,6 +47,9 @@ TAKEOVER_SUFFIXES = [
     "smugmug.com", "strikingly.com", "tilda.ws", "wixsite.com",
     "wordpress.org", "worksites.net", "yolasite.com", "hatenablog.com",
     "feedpress.com", "gemfury.com", "jit.si", "kinsta.cloud",
+    "acquia-sites.com", "mykajabi.com", "canny.io", "createsend.com",
+    "simplebooklet.com", "tictail.com", "wishpondpages.com",
+    "smartling.com", "brightcove.net", "intercom.help",
 ]
 
 
@@ -101,11 +104,21 @@ def collect(apex, enabled=True):
         rows.append(("Cert Spotter", "Lookup failed"))
     else:
         rows.append(("Cert Spotter names", str(len(cs_names))))
+    otx_names = fetch_otx(apex)
+    if otx_names is None:
+        rows.append(("AlienVault OTX", "Lookup failed"))
+    else:
+        rows.append(("OTX names", str(len(otx_names))))
+    anubis_names = fetch_anubis(apex)
+    if anubis_names is None:
+        rows.append(("AnubisDB", "Lookup failed"))
+    else:
+        rows.append(("AnubisDB names", str(len(anubis_names))))
     brute = brute_force(resolver, apex, wildcard_ips)
     rows.append(("Brute-force names tried", str(len(WORDLIST))))
     rows.append(("Brute-force hits", str(len(brute))))
     combined = set(brute)
-    for names in (crt_names, sonar_names or set(), ht_names or set(), tm_names or set(), us_names or set(), cs_names or set()):
+    for names in (crt_names, sonar_names or set(), ht_names or set(), tm_names or set(), us_names or set(), cs_names or set(), otx_names or set(), anubis_names or set()):
         for name in names:
             if name == apex or name.endswith("." + apex):
                 combined.add(name)
@@ -163,6 +176,30 @@ TAKEOVER_BODIES = [
     ("Feedpress", "The feed has not been found"),
     ("Gemfury", "404: This page could not be found"),
     ("Mashery", "Unrecognized domain"),
+    ("Aha!", "There is no portal here"),
+    ("Acquia", "The site you are looking for could not be found"),
+    ("AfterShip", "Oops."),
+    ("Anima", "If this is your website"),
+    ("Brightcove", "Error - 404 Not Found"),
+    ("Campaign Monitor", "Trying to access your account"),
+    ("Canny", "There is no such company"),
+    ("HelpScout", "No settings were found for this company"),
+    ("Intercom", "Uh oh. The page you're looking for is missing"),
+    ("Kajabi", "The page you were looking for doesn't exist"),
+    ("Landingi", "It looks like you're lost"),
+    ("LaunchRock", "It looks like you may have taken a wrong turn"),
+    ("Ngrok", "ngrok.io not found"),
+    ("Pingdom", "Public Report Not Activated"),
+    ("Proposify", "If you need help on getting started"),
+    ("Readthedocs", "is an unknown host"),
+    ("Simplebooklet", "We can't find this Simplebooklet"),
+    ("Smartling", "Domain not configured"),
+    ("SmugMug", "We can't find the page you're looking for"),
+    ("Strikingly", "This page is reserved for artistic dogs"),
+    ("Thinkific", "You may have mistyped the address"),
+    ("Tictail", "to start a store, head over to tictail.com"),
+    ("Uservoice", "This UserVoice subdomain is currently available"),
+    ("Wishpond", "https://www.wishpond.com/404"),
 ]
 
 
@@ -455,6 +492,37 @@ def fetch_certspotter(apex):
             clean = str(dns_name).strip().lower().rstrip(".")
             if clean and not clean.startswith("*.") and (clean == apex or clean.endswith("." + apex)):
                 names.add(clean)
+    return names
+
+
+def fetch_otx(apex):
+    import requests
+    names = set()
+    url = "https://otx.alienvault.com/api/v1/indicators/domain/" + apex + "/passive_dns"
+    try:
+        response = requests.get(url, timeout=12, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return None
+    for item in data.get("passive_dns", []) or []:
+        host = str(item.get("hostname", "") or "").strip().lower().rstrip(".")
+        if host and (host == apex or host.endswith("." + apex)):
+            names.add(host)
+    return names
+
+
+def fetch_anubis(apex):
+    import requests
+    try:
+        response = requests.get("https://jldc.me/anubis/subdomains/" + apex, timeout=12, headers={"User-Agent": BROWSER_UA})
+        data = response.json()
+    except Exception:
+        return None
+    names = set()
+    for entry in data or []:
+        host = str(entry or "").strip().lower().rstrip(".")
+        if host and (host == apex or host.endswith("." + apex)):
+            names.add(host)
     return names
 
 

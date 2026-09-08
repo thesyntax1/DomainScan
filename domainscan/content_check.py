@@ -1331,4 +1331,68 @@ def detect_tech(html, headers, cookies, metas):
         add("Outbrain", "Ad marker found")
     if "doubleclick" in low or "googlesyndication" in low:
         add("Google Ads", "Ad marker found")
+    if "astro-" in low or "astro/client" in low:
+        add("Astro", "Framework marker found")
+    if "sveltekit" in low or "__sveltekit_" in low:
+        add("SvelteKit", "Framework marker found")
+    if "qwik" in low:
+        add("Qwik", "Framework marker found")
+    if "htmx" in low:
+        add("htmx", "Library marker found")
+    if "alpinejs" in low or "alpine.js" in low:
+        add("Alpine.js", "Library marker found")
+    if "tailwind" in low:
+        add("Tailwind CSS", "CSS marker found")
+    if "shadcn" in low:
+        add("shadcn/ui", "Component marker found")
+    if "supabase" in low:
+        add("Supabase", "Backend marker found")
+    if "firebase" in low or "firestore" in low:
+        add("Firebase", "Backend marker found")
+    if "planetscale" in low:
+        add("PlanetScale", "Database marker found")
+    if "neon.tech" in low or "neon-database" in low:
+        add("Neon", "Database marker found")
+    if "turso" in low:
+        add("Turso", "Database marker found")
+    if "clerk" in low and ("clerk.accounts" in low or "clerk.com" in low):
+        add("Clerk", "Auth marker found")
+    if "auth0" in low:
+        add("Auth0", "Auth marker found")
+    if "stripe" in low and ("js.stripe.com" in low or "stripe.com" in low):
+        add("Stripe", "Payment marker found")
+    if "paypal" in low and (".paypal.com" in low or "paypalobjects" in low):
+        add("PayPal", "Payment marker found")
+    if "cloudflareinsights" in low or "beacon.min.js" in low:
+        add("Cloudflare Web Analytics", "Analytics marker found")
+    if "plausible" in low:
+        add("Plausible", "Analytics marker found")
+    if "umami" in low:
+        add("Umami", "Analytics marker found")
+    if "posthog" in low:
+        add("PostHog", "Analytics marker found")
+    if "sentry" in low:
+        add("Sentry", "Error tracking observed")
+    if "datadog" in low:
+        add("Datadog", "Monitoring marker found")
+    if "newrelic" in low:
+        add("New Relic", "Monitoring marker found")
+    if "vercel" in low and ("vercel.app" in low or "vercel-insights" in low):
+        add("Vercel", "Hosting marker found in page")
+    if "webflow" in low:
+        add("Webflow", "Builder marker found")
+    if "framer" in low and "framer.com" in low:
+        add("Framer", "Builder marker found")
+    if "shopify" in low:
+        add("Shopify", "Commerce marker found")
+    if "magento" in low or "mage/" in low:
+        add("Magento", "Commerce marker found")
+    if "ghost-" in low or "ghost/content" in low:
+        add("Ghost", "CMS marker found")
+    if "strapi" in low:
+        add("Strapi", "CMS marker found")
+    if "contentful" in low:
+        add("Contentful", "CMS marker found")
+    if "sanity.io" in low:
+        add("Sanity", "CMS marker found")
     return found
