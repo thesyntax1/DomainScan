@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 - Project branding assets under `domainscan/assets/` (logo.png, icon.ico).
 - `LICENSE` (MIT), `CONTRIBUTING.md`, `SECURITY.md` and this changelog.
 - README badges, logo header and an expanded legal &amp; ethical note.
+- Continuous integration: the offline test suite runs on every push and pull
+  request across Python 3.9, 3.11 and 3.13.
 
 ### Changed
 
@@ -36,8 +38,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Console window flash on Windows**: `openssl` and `ping` probes now run with
+  `CREATE_NO_WINDOW`, so no CMD window pops up and closes during a scan.
 - Deterministic ordering of concurrent DNS result rows.
 - Collision between the two SRV lookups (`_https._tcp` / `_http._tcp`).
+- The NSID probe now queries the target's own zone instead of a hardcoded
+  `example.com`.
 
 ## [1.8.0] - earlier
 

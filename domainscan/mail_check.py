@@ -4,7 +4,7 @@ import socket
 import time
 
 from domainscan import dns_check
-from domainscan.helpers import short
+from domainscan.helpers import no_window_flags, short
 
 
 DKIM_SELECTORS = [
@@ -292,7 +292,7 @@ def smtp_tls_cert_rows(target):
             return []
         proc = subprocess.run(
             ["openssl", "s_client", "-connect", target + ":25", "-starttls", "smtp", "-showcerts"],
-            input="", capture_output=True, text=True, timeout=10)
+            input="", capture_output=True, text=True, timeout=10, creationflags=no_window_flags())
     except Exception:
         return [("MX 1 TLS cert", "STARTTLS probe failed")]
     output = proc.stdout or ""

@@ -1,11 +1,22 @@
 import re
 import socket
+import sys
 import ipaddress
 import urllib.parse
 import datetime
 
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DomainScan/1.0"
+
+
+def no_window_flags():
+    """Return subprocess creation flags that stop a console window from
+    flashing open on Windows when the GUI launches openssl/ping. On other
+    platforms this is 0 (no-op)."""
+    import subprocess
+    if sys.platform.startswith("win"):
+        return subprocess.CREATE_NO_WINDOW
+    return 0
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
