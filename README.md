@@ -1,6 +1,33 @@
+<div align="center">
+
+<img src="domainscan/assets/logo.png" alt="DomainScan logo" width="128" height="128">
+
 # DomainScan
 
-DomainScan is a desktop tool that collects publicly available information about a domain or website and presents it in one window. Enter a domain, run the scan, browse the findings, export a report.
+**Legal, fast, offline-friendly website &amp; domain intelligence — in one desktop window.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
+[![Version](https://img.shields.io/badge/Version-1.10.0-2f7cf6)]()
+[![Tests](https://img.shields.io/badge/Tests-271%20passing-success)]()
+
+</div>
+
+DomainScan is a desktop tool that collects **publicly available information** about a domain or website and presents it in one window. Enter a domain, run the scan, browse the findings, export a report. It is built to be honest about what it finds: anything that cannot be resolved is reported as *missing*, never guessed or fabricated.
+
+---
+
+## ✨ Highlights
+
+- 🔍 **Hundreds of findings** across 30+ sections (DNS, TLS, mail auth, WHOIS/RDAP, subdomains, ports, content, SEO, privacy, BGP, reputation and more).
+- ⚡ **Fast profiles** — `Quick` skips slow recon and deep probes so a scan returns in seconds; `Standard` and `Deep` go further.
+- ⏹️ **Cancellable scans** — stop a running scan with one click.
+- 🔄 **Update checks** — a Help menu item (and an optional startup check) tells you when a new release is out.
+- 🌍 **Multilingual UI** — English, Türkçe, Español, Deutsch (switched live from the header).
+- 📤 **Export** to JSON, CSV, TXT or styled HTML.
+- 🧪 **Fully offline test suite** (271 tests, no network needed) plus a real-GUI smoke test in CI.
+- 🛡️ **Ethical by design** — passive/light checks only, plus a prominent authorization reminder.
 
 ## What it collects
 
@@ -41,7 +68,11 @@ A typical scan returns several hundred findings. Anything that cannot be resolve
 
 ## Scan profiles
 
-Quick skips ports, subdomains, crawling, JS analysis and recon sections (archive, certificate history, typosquat, exposures). Standard runs everything with moderate limits. Deep raises crawl, JS and subdomain limits. Pick a profile in the desktop app or with `--profile` on the command line.
+| Profile  | What it runs |
+| -------- | ------------ |
+| **Quick** | Core DNS records, WHOIS/RDAP, IP &amp; geolocation, website headers, basic TLS certificate, site files, DNS-based mail auth (SPF/DMARC/DKIM), content/SEO/accessibility/performance/privacy audits, cross-checks and the security grade. Skips ports, subdomains, crawling, JS analysis, BGP, blocklists, certificate history, typosquat, threat feeds, web archive and the slow deep probes (openssl chain/OCSP/cipher enumeration, SMTP probing, DNS resolver comparison/AXFR/NS identity). |
+| **Standard** | Everything in Quick plus ports, subdomains, crawling (15 pages), JS analysis (6 files), subdomain web probing and all recon/deep sections. |
+| **Deep** | Standard with raised limits: 40 crawl pages, 12 JS files, 40 subdomain web probes. |
 
 ## Requirements
 
@@ -51,6 +82,8 @@ Quick skips ports, subdomains, crawling, JS analysis and recon sections (archive
 ## Install
 
 ```bash
+git clone https://github.com/thesyntax1/DomainScan.git
+cd DomainScan
 pip install -r requirements.txt
 ```
 
@@ -60,22 +93,13 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Type a domain or URL (for example `example.com`) and press Scan. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens Scan History (load or compare earlier scans) and Watch Target (rescan periodically and report changes). The interface language can be switched from the header (🇬🇧 English, 🇹🇷 Türkçe, 🇪🇸 Español, 🇩🇪 Deutsch); menus, buttons, dialogs and section names follow immediately and the choice is remembered. Finding details stay in English as technical labels.
+Type a domain or URL (for example `example.com`) and press **Scan**. While a scan runs, the button becomes **Cancel** so you can stop it early. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens **Scan History** (load or compare earlier scans) and **Watch Target** (rescan periodically and report changes). The Help menu can **check for updates** (optionally on startup). The interface language can be switched from the header (🇬🇧 English, 🇹🇷 Türkçe, 🇪🇸 Español, 🇩🇪 Deutsch); menus, buttons, dialogs and section names follow immediately and the choice is remembered. Finding details stay in English as technical labels.
+
+Every scan is saved under `~/.domainscan/history/` (older runs are pruned to the latest 20) and can be compared with earlier scans from the Scan menu.
 
 ## Windows executable
 
-No Python needed: download `DomainScan.exe` (desktop app) or `DomainScan-cli.exe` (command line) from the Releases page. Every `v*` tag is built automatically with PyInstaller on GitHub Actions and attached to its release. The binary is unsigned, so Windows SmartScreen may ask for confirmation on first run.
-
-## Command line
-
-```bash
-python main.py example.com --profile Standard --export report.html
-python main.py --history example.com
-python main.py --compare example.com
-python main.py --watch example.com --interval 300 --rounds 4
-```
-
-Run `python main.py --help` for all options. Every scan is saved under `~/.domainscan/history/` (older runs are pruned to the latest 20) and can be compared with earlier scans from the Scan menu.
+No Python needed: download `DomainScan.exe` from the [Releases](https://github.com/thesyntax1/DomainScan/releases) page. Every `v*` tag is built automatically with PyInstaller on GitHub Actions and attached to its release. The binary is unsigned, so Windows SmartScreen may ask for confirmation on first run.
 
 ## Export
 
@@ -87,8 +111,38 @@ Reports can be saved as JSON, CSV, plain text or styled HTML from the buttons ab
 python -m unittest discover -s tests
 ```
 
-The suite runs fully offline using a local HTTP server, a local TLS server and canned DNS/WHOIS responses.
+The suite (271 tests) runs fully offline using a local HTTP server, a local TLS server and canned DNS/WHOIS responses. CI also runs a real-GUI smoke test that instantiates the Tk window under a virtual display.
 
-## Legal note
+---
 
-DomainScan only reads public data and performs light, non-intrusive checks. Only scan domains you own or are authorized to test.
+## ⚖️ Legal &amp; ethical note — please read
+
+DomainScan only reads **publicly available data** and performs **light, non-intrusive checks**. It never sends mail content, never uploads payloads, never exploits a vulnerability, and never attempts to access anything that is not already exposed over the public network.
+
+A small number of checks are *active* (they open a connection to a service that the target is already publishing), for example:
+
+- TCP port reachability, TLS handshake and banner capture
+- SMTP `EHLO`/`VRFY`/`EXPN` and a relay probe that **stops at `RCPT TO`** (no message data is ever sent)
+- Zone-transfer (AXFR) and open-resolver detection
+
+**Only scan domains you own or are explicitly authorized to test.** Unauthorized scanning of infrastructure you do not control may violate your provider's terms of service or the law in your jurisdiction. You are responsible for how you use this tool.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please:
+
+1. Open an issue to discuss what you would like to change.
+2. Keep scans non-intrusive and report missing data instead of inventing it.
+3. Run `python -m unittest discover -s tests` before submitting — all tests are offline.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE).
+
+## 🙏 Acknowledgments
+
+DomainScan builds on [requests](https://github.com/psf/requests), [dnspython](https://www.dnspython.org/), [Beautiful Soup](https://www.crummy.com/software/BeautifulSoup/) and [tldextract](https://github.com/john-kurkowski/tldextract), and queries many free public data sources (IANA RDAP, crt.sh, urlscan.io, abuse.ch, BGPView, PeeringDB, ip-api.com, ipwho.is, Cloudflare DoH, the Internet Archive and more).

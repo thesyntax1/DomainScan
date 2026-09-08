@@ -3,7 +3,7 @@ import re
 import socket
 import subprocess
 
-from domainscan.helpers import BROWSER_UA, fetch_json
+from domainscan.helpers import BROWSER_UA, fetch_json, no_window_flags
 
 
 IPAPI_FIELDS = "status,message,continent,continentCode,country,countryCode,region,regionName,city,district,zip,lat,lon,timezone,offset,currency,isp,org,as,asname,reverse,mobile,proxy,hosting,query"
@@ -41,7 +41,7 @@ def ping(host):
     else:
         command = ["ping", "-c", "1", "-W", "2", host]
     try:
-        proc = subprocess.run(command, capture_output=True, text=True, timeout=8)
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=8, creationflags=no_window_flags())
     except FileNotFoundError:
         return "ping tool not available"
     except Exception:

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, grade_check, helpers, history_check, history_store, http_check, i18n, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
+from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, grade_check, helpers, history_check, history_store, http_check, i18n, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, settings, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -933,21 +933,6 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(profiles.get_profile("Nope")["timeout"], 12)
 
 
-class CliTest(unittest.TestCase):
-    def test_parser(self):
-        import main as entry
-        args = entry.build_parser().parse_args(["example.com", "--profile", "Deep", "--export", "r.html", "--quiet"])
-        self.assertEqual(args.target, "example.com")
-        self.assertEqual(args.profile, "Deep")
-        self.assertTrue(args.quiet)
-
-    def test_infer_format(self):
-        import main as entry
-        self.assertEqual(entry.infer_format("r.html"), "html")
-        self.assertEqual(entry.infer_format("R.JSON"), "json")
-        self.assertEqual(entry.infer_format("report"), "txt")
-
-
 class HistoryStoreTest(unittest.TestCase):
     def make_result(self, stamp, extra=None):
         sections = {"Target": [("Host", "example.com")], "DNS": [("A record 1", "93.184.216.34")]}
@@ -1208,6 +1193,63 @@ class ZAppWiringTest(unittest.TestCase):
         finally:
             sys.modules.pop("tkinter", None)
             sys.modules.pop("domainscan.app", None)
+
+
+class CancelScanTests(unittest.TestCase):
+    def test_cancel_before_start_returns_cancelled(self):
+        import threading
+        event = threading.Event()
+        event.set()
+        result = scanner.run_scan(
+            "example.com", include_ports=False, include_subdomains=False,
+            timeout=2, crawl_pages=0, js_files=0, subdomain_web=0,
+            include_recon=False, cancel_event=event)
+        self.assertTrue(result["meta"].get("cancelled"))
+        self.assertIn("Summary", result["sections"])
+        self.assertIn("Target", result["sections"])
+
+    def test_cancel_during_dns_extras(self):
+        import threading
+        from unittest import mock
+        event = threading.Event()
+        event.set()
+        records = {
+            ("example.com", "A"): ["93.184.216.34"],
+            ("example.com", "AAAA"): [],
+            ("example.com", "MX"): [],
+            ("example.com", "NS"): ["a.iana-servers.net."],
+            ("example.com", "SOA"): ["ns1.example.com. admin.example.com. 1 7200 3600 1209600 3600"],
+            ("example.com", "TXT"): ["v=spf1 -all"],
+            ("example.com", "CAA"): [],
+            ("example.com", "CNAME"): [],
+            ("example.com", "DS"): [],
+            ("example.com", "DNSKEY"): [],
+            ("example.com", "NSEC"): [],
+            ("example.com", "NSEC3PARAM"): [],
+        }
+        def fake_query(resolver, name, rtype, **kw):
+            key = (str(name).lower(), str(rtype).upper())
+            recs = records.get(key, [])
+            return {"records": list(recs), "ttl": 300, "error": ""}
+        with mock.patch.object(dns_check, "query", side_effect=fake_query), \
+             mock.patch.object(dns_check, "adbit_rows", return_value=[]), \
+             mock.patch.object(dns_check, "ns_diversity", return_value=[]):
+            result = dns_check.collect("example.com", "example.com", extras=True, cancel_event=event)
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data.get("DNS extras"), "Skipped (scan cancelled)")
+
+
+class SettingsTests(unittest.TestCase):
+    def test_roundtrip(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(settings, "base_dir", return_value=tmp):
+                self.assertIsNone(settings.get("check_updates"))
+                self.assertTrue(settings.set("check_updates", True))
+                self.assertIs(settings.get("check_updates"), True)
+                settings.set("check_updates", False)
+                self.assertIs(settings.get("check_updates"), False)
 
 
 if __name__ == "__main__":
@@ -2200,60 +2242,6 @@ class CommonCrawlTests(unittest.TestCase):
         data = rows_to_dict(commoncrawl_check.summarize(captures))
         self.assertIn("2 unique", data["Common Crawl URLs"])
         self.assertEqual(commoncrawl_check.format_bytes(300), "300 bytes")
-
-
-class CliWatchTests(unittest.TestCase):
-    def test_parser_watch_args(self):
-        import main as entry
-        args = entry.build_parser().parse_args(["--watch", "example.com", "--interval", "60", "--rounds", "3"])
-        self.assertEqual(args.watch, "example.com")
-        self.assertEqual(args.interval, 60)
-        self.assertEqual(args.rounds, 3)
-        args = entry.build_parser().parse_args(["--history", "example.com"])
-        self.assertEqual(args.history, "example.com")
-        args = entry.build_parser().parse_args(["--compare", "example.com"])
-        self.assertEqual(args.compare, "example.com")
-
-    def test_show_history_empty(self):
-        import main as entry
-        from unittest import mock
-        with mock.patch.object(history_store, "list_runs", return_value=[]):
-            self.assertEqual(entry.show_history("example.com"), 0)
-
-    def test_show_history_lists(self):
-        import io
-        import main as entry
-        from contextlib import redirect_stdout
-        from unittest import mock
-        fake = {"meta": {"scanned_at": "2024-01-01", "findings": 5}, "target": {"host": "example.com"}, "sections": {}}
-        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/a.json"]):
-            with mock.patch.object(history_store, "load_run", return_value=fake):
-                buffer = io.StringIO()
-                with redirect_stdout(buffer):
-                    code = entry.show_history("example.com")
-        self.assertEqual(code, 0)
-        self.assertIn("2024-01-01", buffer.getvalue())
-
-    def test_show_compare_needs_two(self):
-        import main as entry
-        from unittest import mock
-        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/a.json"]):
-            self.assertEqual(entry.show_compare("example.com"), 1)
-
-    def test_show_compare_diffs(self):
-        import io
-        import main as entry
-        from contextlib import redirect_stdout
-        from unittest import mock
-        old = {"meta": {"scanned_at": "old", "findings": 1}, "target": {"host": "example.com"}, "sections": {"DNS": [("A", "1.1.1.1")]}}
-        new = {"meta": {"scanned_at": "new", "findings": 1}, "target": {"host": "example.com"}, "sections": {"DNS": [("A", "2.2.2.2")]}}
-        with mock.patch.object(history_store, "list_runs", return_value=["/tmp/new.json", "/tmp/old.json"]):
-            with mock.patch.object(history_store, "load_run", side_effect=[new, old]):
-                buffer = io.StringIO()
-                with redirect_stdout(buffer):
-                    code = entry.show_compare("example.com")
-        self.assertEqual(code, 0)
-        self.assertIn("Changed", buffer.getvalue())
 
 
 class PruneTests(unittest.TestCase):

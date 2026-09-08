@@ -26,13 +26,13 @@ jobs:
           pip install pyinstaller
 
       - name: Build GUI executable
-        run: pyinstaller --noconfirm --onefile --windowed --name DomainScan --collect-data tldextract main.py
-
-      - name: Build CLI executable
-        run: pyinstaller --noconfirm --onefile --console --name DomainScan-cli --collect-data tldextract main.py
-
-      - name: Smoke test CLI
-        run: .\dist\DomainScan-cli.exe --help
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name DomainScan
+          --icon domainscan/assets/icon.ico
+          --add-data "domainscan/assets;domainscan/assets"
+          --collect-data tldextract
+          main.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

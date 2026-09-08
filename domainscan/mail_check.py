@@ -4,7 +4,7 @@ import socket
 import time
 
 from domainscan import dns_check
-from domainscan.helpers import short
+from domainscan.helpers import no_window_flags, short
 
 
 DKIM_SELECTORS = [
@@ -14,7 +14,7 @@ DKIM_SELECTORS = [
 ]
 
 
-def collect(host, apex, dns_data):
+def collect(host, apex, dns_data, deep=True):
     rows = []
     if apex:
         name = apex
@@ -26,7 +26,7 @@ def collect(host, apex, dns_data):
     resolver = None
     if dns_check.HAS_DNSPYTHON:
         resolver = dns_check.make_resolver()
-    rows.extend(describe_mx(mx_records, resolver))
+    rows.extend(describe_mx(mx_records, resolver, deep=deep))
     spf_rows = describe_spf(txt_records, resolver, name)
     rows.extend(spf_rows)
     if resolver is None:
@@ -34,15 +34,18 @@ def collect(host, apex, dns_data):
         return {"rows": rows}
     rows.extend(describe_dmarc(resolver, name))
     rows.extend(describe_dkim(resolver, name))
-    rows.extend(describe_bimi_mtasts(resolver, name))
     rows.extend(describe_tlsrpt(resolver, name))
     rows.extend(describe_autoconfig(resolver, name))
-    mx_hosts = []
-    for record in mx_records:
-        bits = record.split()
-        if len(bits) >= 2:
-            mx_hosts.append(bits[1].rstrip(".").lower())
-    rows.extend(describe_mta_sts_policy(name, mx_hosts=mx_hosts))
+    if deep:
+        rows.extend(describe_bimi_mtasts(resolver, name))
+        mx_hosts = []
+        for record in mx_records:
+            bits = record.split()
+            if len(bits) >= 2:
+                mx_hosts.append(bits[1].rstrip(".").lower())
+        rows.extend(describe_mta_sts_policy(name, mx_hosts=mx_hosts))
+    else:
+        rows.append(("Mail deep checks", "Skipped (Quick profile: SMTP probes, BIMI, MTA-STS)"))
     rows.extend(spoof_rows(spf_rows, rows))
     return {"rows": rows}
 
@@ -66,7 +69,7 @@ def spoof_rows(spf_rows, all_rows):
     return rows
 
 
-def describe_mx(records, resolver=None):
+def describe_mx(records, resolver=None, deep=True):
     rows = []
     if not records:
         rows.append(("MX records", "None (domain cannot receive mail)"))
@@ -99,14 +102,15 @@ def describe_mx(records, resolver=None):
             ptr = mx_ptr(addresses[0])
             rows.append(("MX " + str(index) + " PTR", ptr))
             rows.append(("MX " + str(index) + " FCrDNS", mx_forward_confirm(ptr, addresses[0])))
-        rows.append(("MX " + str(index) + " SMTP", smtp_probe(target)))
-        rows.append(("MX " + str(index) + " STARTTLS", smtp_starttls(target)))
-        if index <= 2:
-            rows.extend(smtp_ehlo_rows(target, index))
-        if index == 1:
-            rows.extend(smtp_tls_cert_rows(target))
-            rows.extend(smtp_vrfy_rows(target))
-            rows.extend(smtp_relay_rows(target))
+        if deep:
+            rows.append(("MX " + str(index) + " SMTP", smtp_probe(target)))
+            rows.append(("MX " + str(index) + " STARTTLS", smtp_starttls(target)))
+            if index <= 2:
+                rows.extend(smtp_ehlo_rows(target, index))
+            if index == 1:
+                rows.extend(smtp_tls_cert_rows(target))
+                rows.extend(smtp_vrfy_rows(target))
+                rows.extend(smtp_relay_rows(target))
         if resolver is not None and index <= 3:
             rows.append(("MX " + str(index) + " DANE", dane_status(resolver, target)))
     return rows
@@ -288,7 +292,7 @@ def smtp_tls_cert_rows(target):
             return []
         proc = subprocess.run(
             ["openssl", "s_client", "-connect", target + ":25", "-starttls", "smtp", "-showcerts"],
-            input="", capture_output=True, text=True, timeout=10)
+            input="", capture_output=True, text=True, timeout=10, creationflags=no_window_flags())
     except Exception:
         return [("MX 1 TLS cert", "STARTTLS probe failed")]
     output = proc.stdout or ""

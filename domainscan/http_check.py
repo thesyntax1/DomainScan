@@ -6,7 +6,7 @@ import warnings
 import hashlib
 import datetime
 
-from domainscan.helpers import BROWSER_UA, short
+from domainscan.helpers import BROWSER_UA, no_window_flags, short
 
 
 SECURITY_HEADERS = [
@@ -463,7 +463,7 @@ def security_summary(headers):
     return rows
 
 
-def collect_tls(host, port=443):
+def collect_tls(host, port=443, deep=True):
     rows = []
     try:
         trusted, trust_error = verify_handshake(host, port)
@@ -496,12 +496,17 @@ def collect_tls(host, port=443):
     else:
         rows.append(("Chain trusted", "No: " + short(trust_error, 200)))
     rows.extend(parse_cert(cert, der, host))
-    rows.extend(openssl_chain(host, port))
-    rows.extend(openssl_cert_text(host, port))
-    rows.extend(ocsp_stapling(host, port))
-    rows.extend(session_reuse(host, port))
-    rows.extend(weak_cipher_probe(host, port))
-    rows.extend(accepted_cipher_rows(host, port))
+    # Deep-only probes: each of these shells out to openssl or opens extra
+    # sockets, so they are skipped on the Quick profile to keep it fast.
+    if deep:
+        rows.extend(openssl_chain(host, port))
+        rows.extend(openssl_cert_text(host, port))
+        rows.extend(ocsp_stapling(host, port))
+        rows.extend(session_reuse(host, port))
+        rows.extend(weak_cipher_probe(host, port))
+        rows.extend(accepted_cipher_rows(host, port))
+    else:
+        rows.append(("TLS deep checks", "Skipped (Quick profile: chain text, OCSP, ciphers, session reuse)"))
     return {"rows": rows}
 
 
@@ -627,7 +632,7 @@ def openssl_chain(host, port=443, timeout=10):
     try:
         proc = subprocess.run(
             ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-showcerts"],
-            input="", capture_output=True, text=True, timeout=timeout)
+            input="", capture_output=True, text=True, timeout=timeout, creationflags=no_window_flags())
     except Exception:
         return [("TLS chain (openssl)", "Probe failed")]
     return parse_openssl_chain(proc.stdout or "")
@@ -658,7 +663,7 @@ def weak_cipher_probe(host, port=443, timeout=10):
         try:
             proc = subprocess.run(
                 ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-cipher", cipher],
-                input="", capture_output=True, text=True, timeout=timeout)
+                input="", capture_output=True, text=True, timeout=timeout, creationflags=no_window_flags())
         except Exception:
             rows.append((label, "Probe failed"))
             continue
@@ -674,7 +679,7 @@ def openssl_cert_text(host, port=443, timeout=10):
     try:
         proc = subprocess.run(
             ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-showcerts"],
-            input="", capture_output=True, text=True, timeout=timeout)
+            input="", capture_output=True, text=True, timeout=timeout, creationflags=no_window_flags())
     except Exception:
         return [("Certificate details", "Probe failed")]
     match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", proc.stdout or "", re.DOTALL)
@@ -683,7 +688,7 @@ def openssl_cert_text(host, port=443, timeout=10):
     try:
         proc2 = subprocess.run(
             ["openssl", "x509", "-noout", "-text"],
-            input=match.group(0), capture_output=True, text=True, timeout=timeout)
+            input=match.group(0), capture_output=True, text=True, timeout=timeout, creationflags=no_window_flags())
     except Exception:
         return [("Certificate details", "Parse failed")]
     return parse_openssl_text(proc2.stdout or "")
@@ -739,7 +744,7 @@ def ocsp_stapling(host, port=443, timeout=10):
     try:
         proc = subprocess.run(
             ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-status"],
-            input="", capture_output=True, text=True, timeout=timeout)
+            input="", capture_output=True, text=True, timeout=timeout, creationflags=no_window_flags())
     except Exception:
         return [("OCSP stapling", "Probe failed")]
     output = (proc.stdout or "") + (proc.stderr or "")
@@ -765,7 +770,7 @@ def session_reuse(host, port=443, timeout=12):
     try:
         proc = subprocess.run(
             ["openssl", "s_client", "-connect", host + ":" + str(port), "-servername", host, "-reconnect", "-no_shutdown"],
-            input="", capture_output=True, text=True, timeout=timeout)
+            input="", capture_output=True, text=True, timeout=timeout, creationflags=no_window_flags())
     except Exception:
         return [("Session resumption", "Probe failed")]
     output = (proc.stdout or "") + (proc.stderr or "")

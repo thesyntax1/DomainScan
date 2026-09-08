@@ -1,13 +1,28 @@
+import os
 import queue
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from domainscan import __version__, helpers, history_store, i18n, profiles, scanner, whois_check
+from domainscan import __version__, helpers, history_store, i18n, profiles, scanner, settings, whois_check
 
 
 APP_TITLE = "DomainScan"
 APP_SUBTITLE = "Legal website and domain intelligence"
+
+
+def asset_path(name):
+    """Locate a bundled asset in both source and frozen (PyInstaller) runs."""
+    candidates = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(os.path.join(base, "domainscan", "assets", name))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
 
 BG = "#151a21"
 PANEL = "#1e242d"
@@ -40,6 +55,9 @@ class DomainScanApp:
         self.ports_var = tk.BooleanVar(value=True)
         self.sub_var = tk.BooleanVar(value=True)
         self.caps = profiles.get_profile("Standard")
+        self.cancel_event = None
+        self.update_var = tk.BooleanVar(value=bool(settings.get("check_updates", False)))
+        self.load_branding()
         self.setup_style()
         self.build_menu()
         self.build_header()
@@ -48,6 +66,11 @@ class DomainScanApp:
         self.build_main()
         self.build_status()
         self.poll_queue()
+        try:
+            if settings.get("check_updates", False):
+                self.check_updates_silent()
+        except Exception:
+            pass
 
     def t(self, name, **values):
         return i18n.get(self.lang, name, **values)
@@ -72,6 +95,9 @@ class DomainScanApp:
         tools_menu = tk.Menu(menubar, tearoff=0)
         tools_menu.add_command(label=self.t("menu_whois"), command=self.open_whois_lookup)
         help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label=self.t("menu_check_updates"), command=self.check_updates)
+        help_menu.add_checkbutton(label=self.t("menu_updates_startup"), variable=self.update_var, command=self.on_update_toggle)
+        help_menu.add_separator()
         help_menu.add_command(label=self.t("menu_about"), command=self.show_about)
         menubar.add_cascade(label=self.t("menu_file"), menu=file_menu)
         menubar.add_cascade(label=self.t("menu_scan"), menu=scan_menu)
@@ -102,9 +128,35 @@ class DomainScanApp:
         style.configure("Treeview.Heading", background=PANEL2, foreground=TEXT, font=("Segoe UI", 10, "bold"), padding=6)
         style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "white")])
 
+    def load_branding(self):
+        self.logo_image = None
+        logo_path = asset_path("logo.png")
+        if logo_path:
+            try:
+                self.logo_image = tk.PhotoImage(file=logo_path)
+                if self.logo_image.width() > 96:
+                    factor = max(1, self.logo_image.width() // 96)
+                    self.logo_image = self.logo_image.subsample(factor, factor)
+            except Exception:
+                self.logo_image = None
+        ico_path = asset_path("icon.ico")
+        try:
+            if ico_path and sys.platform.startswith("win"):
+                self.root.iconbitmap(ico_path)
+        except Exception:
+            pass
+        if self.logo_image is not None:
+            try:
+                self.root.iconphoto(True, self.logo_image)
+            except Exception:
+                pass
+
     def build_header(self):
         header = ttk.Frame(self.root)
         header.pack(fill="x", padx=16, pady=(14, 4))
+        if self.logo_image is not None:
+            logo = tk.Label(header, image=self.logo_image, bg=BG)
+            logo.pack(side="left", padx=(0, 10))
         title = tk.Label(header, text=APP_TITLE, font=("Segoe UI", 22, "bold"), bg=BG, fg=TEXT)
         title.pack(side="left")
         self.subtitle_label = tk.Label(header, text="  " + self.t("subtitle"), font=("Segoe UI", 11), bg=BG, fg=MUTED)
@@ -237,7 +289,7 @@ class DomainScanApp:
         self.about_button.configure(text=self.t("about"))
         self.lang_label.configure(text=self.t("language_label"))
         self.target_prompt.configure(text=self.t("target_label"))
-        self.scan_button.configure(text=self.t("scan"))
+        self.scan_button.configure(text=self.t("cancel") if self.scanning else self.t("scan"))
         self.clear_button.configure(text=self.t("clear"))
         self.compare_button.configure(text=self.t("compare"))
         self.ports_check.configure(text=self.t("ports"))
@@ -299,7 +351,8 @@ class DomainScanApp:
             messagebox.showwarning(self.t("missing_target_title"), self.t("missing_target_body"))
             return
         self.scanning = True
-        self.scan_button.configure(state="disabled")
+        self.cancel_event = threading.Event()
+        self.scan_button.configure(text=self.t("cancel"), command=self.cancel_scan, state="normal")
         self.result = None
         self.all_rows = []
         for child in self.tree.get_children():
@@ -312,6 +365,17 @@ class DomainScanApp:
         self.set_detail(self.t("scanning", target=target))
         thread = threading.Thread(target=self.worker, args=(target,), daemon=True)
         thread.start()
+
+    def cancel_scan(self):
+        if not self.scanning:
+            return
+        if self.cancel_event is not None:
+            self.cancel_event.set()
+        self.scan_button.configure(state="disabled")
+        self.status_label.configure(text=self.t("cancelling"))
+
+    def reset_scan_button(self):
+        self.scan_button.configure(text=self.t("scan"), command=self.start_scan, state="normal")
 
     def worker(self, target):
         def forward(percent, message):
@@ -328,6 +392,7 @@ class DomainScanApp:
                 js_files=caps["js_files"],
                 subdomain_web=caps["subdomain_web"],
                 include_recon=caps["include_recon"],
+                cancel_event=self.cancel_event,
             )
         except ValueError as exc:
             self.queue.put(("invalid", str(exc)))
@@ -362,17 +427,24 @@ class DomainScanApp:
                 elif kind == "watch_done":
                     self.watch_stop = None
                     self.status_label.configure(text=self.t("watch_finished"))
+                elif kind == "update":
+                    self.finish_update_check(message[1], message[2], message[3])
         except queue.Empty:
             pass
         self.root.after(120, self.poll_queue)
 
     def finish_scan(self, result):
         self.scanning = False
-        self.scan_button.configure(state="normal")
+        self.cancel_event = None
+        self.reset_scan_button()
         self.result = result
         self.progress.configure(value=100)
         meta = result["meta"]
-        self.status_label.configure(text=self.t("scan_complete", seconds=meta["duration_seconds"]))
+        cancelled = bool(meta.get("cancelled"))
+        if cancelled:
+            self.status_label.configure(text=self.t("scan_cancelled"))
+        else:
+            self.status_label.configure(text=self.t("scan_complete", seconds=meta["duration_seconds"]))
         self.count_label.configure(text=self.t("findings", n=meta["findings"]))
         self.all_rows = []
         for section, items in result["sections"].items():
@@ -381,15 +453,20 @@ class DomainScanApp:
         self.section_choices(result["sections"].keys())
         self.select_section_key("*all*")
         self.apply_filter()
-        self.set_detail(self.t("scan_finished_detail", host=result["target"]["host"], n=meta["findings"]))
-        try:
-            history_store.save_run(result)
-        except Exception:
-            pass
+        host = result["target"].get("host", "?")
+        if cancelled:
+            self.set_detail(self.t("scan_cancelled_detail", host=host))
+        else:
+            self.set_detail(self.t("scan_finished_detail", host=host, n=meta["findings"]))
+            try:
+                history_store.save_run(result)
+            except Exception:
+                pass
 
     def fail_scan(self, text):
         self.scanning = False
-        self.scan_button.configure(state="normal")
+        self.cancel_event = None
+        self.reset_scan_button()
         self.status_label.configure(text=text)
         messagebox.showerror("DomainScan", text)
 
@@ -833,6 +910,43 @@ class DomainScanApp:
 
     def show_about(self):
         messagebox.showinfo(self.t("about_title"), self.t("about_body", version=__version__))
+
+    def on_update_toggle(self):
+        try:
+            settings.set("check_updates", bool(self.update_var.get()))
+        except Exception:
+            pass
+
+    def check_updates(self):
+        threading.Thread(target=self._check_updates_worker, args=(False,), daemon=True).start()
+
+    def check_updates_silent(self):
+        threading.Thread(target=self._check_updates_worker, args=(True,), daemon=True).start()
+
+    def _check_updates_worker(self, silent):
+        import requests
+        try:
+            response = requests.get(
+                "https://api.github.com/repos/thesyntax1/DomainScan/releases/latest",
+                timeout=6,
+                headers={"User-Agent": "DomainScan/" + __version__, "Accept": "application/vnd.github+json"},
+            )
+            if response.status_code == 200:
+                latest = (response.json().get("tag_name") or "").lstrip("v")
+                self.queue.put(("update", "ok", latest, silent))
+                return
+        except Exception:
+            pass
+        self.queue.put(("update", "failed", "", silent))
+
+    def finish_update_check(self, status, latest, silent):
+        if status == "ok":
+            if latest and latest != __version__:
+                messagebox.showinfo(self.t("update_available_title"), self.t("update_available_body", version=latest))
+            elif not silent:
+                messagebox.showinfo(self.t("up_to_date_title"), self.t("up_to_date_body", version=__version__))
+        elif not silent:
+            messagebox.showinfo(self.t("update_failed_title"), self.t("update_failed_body"))
 
 
 def main():
