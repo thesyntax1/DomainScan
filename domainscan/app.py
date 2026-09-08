@@ -120,6 +120,9 @@ class DomainScanApp:
         style.map("TButton", background=[("active", ACCENT_ACTIVE)], foreground=[("active", "white")])
         style.configure("Accent.TButton", background=ACCENT, foreground="white", font=("Segoe UI", 10, "bold"), padding=(18, 7))
         style.map("Accent.TButton", background=[("active", ACCENT_ACTIVE)])
+        style.configure("Danger.TButton", background="#d94545", foreground="white", font=("Segoe UI", 10, "bold"), padding=(18, 7))
+        style.map("Danger.TButton", background=[("active", "#b53030")])
+        style.configure("Disabled.TButton", background="#3a3f48", foreground="#6b7280")
         style.configure("TEntry", fieldbackground=ENTRY_BG, foreground=TEXT, bordercolor=BORDER, insertcolor=TEXT, padding=6)
         style.configure("TCheckbutton", background=BG, foreground=TEXT)
         style.configure("TCombobox", fieldbackground=ENTRY_BG, background=PANEL2, foreground=TEXT, arrowcolor=TEXT)
@@ -289,7 +292,11 @@ class DomainScanApp:
         self.about_button.configure(text=self.t("about"))
         self.lang_label.configure(text=self.t("language_label"))
         self.target_prompt.configure(text=self.t("target_label"))
-        self.scan_button.configure(text=self.t("cancel") if self.scanning else self.t("scan"))
+        self.scan_button.configure(text=self.t("stop_scan") if self.scanning else self.t("scan"))
+        if self.scanning:
+            self.scan_button.configure(style="Danger.TButton")
+        else:
+            self.scan_button.configure(style="Accent.TButton")
         self.clear_button.configure(text=self.t("clear"))
         self.compare_button.configure(text=self.t("compare"))
         self.ports_check.configure(text=self.t("ports"))
@@ -352,7 +359,7 @@ class DomainScanApp:
             return
         self.scanning = True
         self.cancel_event = threading.Event()
-        self.scan_button.configure(text=self.t("cancel"), command=self.cancel_scan, state="normal")
+        self.scan_button.configure(text=self.t("stop_scan"), command=self.cancel_scan, style="Danger.TButton", state="normal")
         self.result = None
         self.all_rows = []
         for child in self.tree.get_children():
@@ -371,11 +378,11 @@ class DomainScanApp:
             return
         if self.cancel_event is not None:
             self.cancel_event.set()
-        self.scan_button.configure(state="disabled")
+        self.scan_button.configure(text=self.t("stopping_scan"), state="disabled")
         self.status_label.configure(text=self.t("cancelling"))
 
     def reset_scan_button(self):
-        self.scan_button.configure(text=self.t("scan"), command=self.start_scan, state="normal")
+        self.scan_button.configure(text=self.t("scan"), command=self.start_scan, style="Accent.TButton", state="normal")
 
     def worker(self, target):
         def forward(percent, message):
@@ -407,28 +414,31 @@ class DomainScanApp:
             while True:
                 message = self.queue.get_nowait()
                 kind = message[0]
-                if kind == "progress":
-                    self.progress.configure(value=message[1])
-                    self.status_label.configure(text=message[2])
-                elif kind == "done":
-                    self.finish_scan(message[1])
-                elif kind == "invalid":
-                    self.fail_scan(self.t("invalid_target", detail=message[1]))
-                elif kind == "error":
-                    self.fail_scan(self.t("scan_failed", detail=message[1]))
-                elif kind == "watch":
-                    if self.watch_log is not None:
-                        try:
-                            self.watch_log.insert(tk.END, message[1])
-                            self.watch_log.see(tk.END)
-                        except Exception:
-                            pass
-                    self.status_label.configure(text=message[1][:120])
-                elif kind == "watch_done":
-                    self.watch_stop = None
-                    self.status_label.configure(text=self.t("watch_finished"))
-                elif kind == "update":
-                    self.finish_update_check(message[1], message[2], message[3])
+                try:
+                    if kind == "progress":
+                        self.progress.configure(value=message[1])
+                        self.status_label.configure(text=message[2])
+                    elif kind == "done":
+                        self.finish_scan(message[1])
+                    elif kind == "invalid":
+                        self.fail_scan(self.t("invalid_target", detail=message[1]))
+                    elif kind == "error":
+                        self.fail_scan(self.t("scan_failed", detail=message[1]))
+                    elif kind == "watch":
+                        if self.watch_log is not None:
+                            try:
+                                self.watch_log.insert(tk.END, message[1])
+                                self.watch_log.see(tk.END)
+                            except Exception:
+                                pass
+                        self.status_label.configure(text=message[1][:120])
+                    elif kind == "watch_done":
+                        self.watch_stop = None
+                        self.status_label.configure(text=self.t("watch_finished"))
+                    elif kind == "update":
+                        self.finish_update_check(message[1], message[2], message[3])
+                except Exception:
+                    pass
         except queue.Empty:
             pass
         self.root.after(120, self.poll_queue)
@@ -783,6 +793,7 @@ class DomainScanApp:
                         js_files=0,
                         subdomain_web=0,
                         include_recon=False,
+                        cancel_event=stop_event,
                     )
                 except Exception as exc:
                     self.queue.put(("watch", self.t("round_failed", round=round_no, error=exc.__class__.__name__)))
