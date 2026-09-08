@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dns.resolver
 
-from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, grade_check, helpers, history_check, history_store, http_check, i18n, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
+from domainscan import a11y_check, bgp_check, commoncrawl_check, content_check, crawl_check, cross_check, crtsh_check, dns_check, exposure_check, files_check, grade_check, helpers, history_check, history_store, http_check, i18n, js_check, mail_check, network_check, perf_check, ports_check, privacy_check, profiles, rdap_check, reputation_check, scanner, seo_check, settings, subdomain_check, threat_check, typo_check, wayback_check, web_extra_check, whois_check
 
 
 SAMPLE_WHOIS = """   Domain Name: EXAMPLE.COM
@@ -1193,6 +1193,63 @@ class ZAppWiringTest(unittest.TestCase):
         finally:
             sys.modules.pop("tkinter", None)
             sys.modules.pop("domainscan.app", None)
+
+
+class CancelScanTests(unittest.TestCase):
+    def test_cancel_before_start_returns_cancelled(self):
+        import threading
+        event = threading.Event()
+        event.set()
+        result = scanner.run_scan(
+            "example.com", include_ports=False, include_subdomains=False,
+            timeout=2, crawl_pages=0, js_files=0, subdomain_web=0,
+            include_recon=False, cancel_event=event)
+        self.assertTrue(result["meta"].get("cancelled"))
+        self.assertIn("Summary", result["sections"])
+        self.assertIn("Target", result["sections"])
+
+    def test_cancel_during_dns_extras(self):
+        import threading
+        from unittest import mock
+        event = threading.Event()
+        event.set()
+        records = {
+            ("example.com", "A"): ["93.184.216.34"],
+            ("example.com", "AAAA"): [],
+            ("example.com", "MX"): [],
+            ("example.com", "NS"): ["a.iana-servers.net."],
+            ("example.com", "SOA"): ["ns1.example.com. admin.example.com. 1 7200 3600 1209600 3600"],
+            ("example.com", "TXT"): ["v=spf1 -all"],
+            ("example.com", "CAA"): [],
+            ("example.com", "CNAME"): [],
+            ("example.com", "DS"): [],
+            ("example.com", "DNSKEY"): [],
+            ("example.com", "NSEC"): [],
+            ("example.com", "NSEC3PARAM"): [],
+        }
+        def fake_query(resolver, name, rtype, **kw):
+            key = (str(name).lower(), str(rtype).upper())
+            recs = records.get(key, [])
+            return {"records": list(recs), "ttl": 300, "error": ""}
+        with mock.patch.object(dns_check, "query", side_effect=fake_query), \
+             mock.patch.object(dns_check, "adbit_rows", return_value=[]), \
+             mock.patch.object(dns_check, "ns_diversity", return_value=[]):
+            result = dns_check.collect("example.com", "example.com", extras=True, cancel_event=event)
+        data = rows_to_dict(result["rows"])
+        self.assertEqual(data.get("DNS extras"), "Skipped (scan cancelled)")
+
+
+class SettingsTests(unittest.TestCase):
+    def test_roundtrip(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(settings, "base_dir", return_value=tmp):
+                self.assertIsNone(settings.get("check_updates"))
+                self.assertTrue(settings.set("check_updates", True))
+                self.assertIs(settings.get("check_updates"), True)
+                settings.set("check_updates", False)
+                self.assertIs(settings.get("check_updates"), False)
 
 
 if __name__ == "__main__":

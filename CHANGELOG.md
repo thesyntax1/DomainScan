@@ -4,6 +4,21 @@ All notable changes to DomainScan are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-09-08
+
+### Added
+
+- **Cancel button**: a running scan can now be cancelled; the button flips to
+  "Cancel" while scanning and in-flight checks stop at the next checkpoint.
+- **Check for updates**: a Help menu item checks GitHub Releases for a newer
+  version, with an optional "check on startup" setting (remembered).
+- Real GUI smoke test (`tests/gui_smoke.py`) that instantiates the actual Tk
+  window and runs in CI under a virtual display.
+
+### Fixed
+
+- Cancelled scans no longer appear in scan history.
+
 ## [1.9.0] - 2026-09-08
 
 ### Added

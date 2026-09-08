@@ -9,8 +9,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.9.0-2f7cf6)]()
-[![Tests](https://img.shields.io/badge/Tests-268%20passing-success)]()
+[![Version](https://img.shields.io/badge/Version-1.10.0-2f7cf6)]()
+[![Tests](https://img.shields.io/badge/Tests-271%20passing-success)]()
 
 </div>
 
@@ -22,9 +22,11 @@ DomainScan is a desktop tool that collects **publicly available information** ab
 
 - 🔍 **Hundreds of findings** across 30+ sections (DNS, TLS, mail auth, WHOIS/RDAP, subdomains, ports, content, SEO, privacy, BGP, reputation and more).
 - ⚡ **Fast profiles** — `Quick` skips slow recon and deep probes so a scan returns in seconds; `Standard` and `Deep` go further.
+- ⏹️ **Cancellable scans** — stop a running scan with one click.
+- 🔄 **Update checks** — a Help menu item (and an optional startup check) tells you when a new release is out.
 - 🌍 **Multilingual UI** — English, Türkçe, Español, Deutsch (switched live from the header).
 - 📤 **Export** to JSON, CSV, TXT or styled HTML.
-- 🧪 **Fully offline test suite** (268 tests, no network needed).
+- 🧪 **Fully offline test suite** (271 tests, no network needed) plus a real-GUI smoke test in CI.
 - 🛡️ **Ethical by design** — passive/light checks only, plus a prominent authorization reminder.
 
 ## What it collects
@@ -91,7 +93,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Type a domain or URL (for example `example.com`) and press **Scan**. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens **Scan History** (load or compare earlier scans) and **Watch Target** (rescan periodically and report changes). The interface language can be switched from the header (🇬🇧 English, 🇹🇷 Türkçe, 🇪🇸 Español, 🇩🇪 Deutsch); menus, buttons, dialogs and section names follow immediately and the choice is remembered. Finding details stay in English as technical labels.
+Type a domain or URL (for example `example.com`) and press **Scan**. While a scan runs, the button becomes **Cancel** so you can stop it early. The Tools menu offers a standalone WHOIS lookup for any domain or IP. The Scan menu opens **Scan History** (load or compare earlier scans) and **Watch Target** (rescan periodically and report changes). The Help menu can **check for updates** (optionally on startup). The interface language can be switched from the header (🇬🇧 English, 🇹🇷 Türkçe, 🇪🇸 Español, 🇩🇪 Deutsch); menus, buttons, dialogs and section names follow immediately and the choice is remembered. Finding details stay in English as technical labels.
 
 Every scan is saved under `~/.domainscan/history/` (older runs are pruned to the latest 20) and can be compared with earlier scans from the Scan menu.
 
@@ -109,7 +111,7 @@ Reports can be saved as JSON, CSV, plain text or styled HTML from the buttons ab
 python -m unittest discover -s tests
 ```
 
-The suite (268 tests) runs fully offline using a local HTTP server, a local TLS server and canned DNS/WHOIS responses.
+The suite (271 tests) runs fully offline using a local HTTP server, a local TLS server and canned DNS/WHOIS responses. CI also runs a real-GUI smoke test that instantiates the Tk window under a virtual display.
 
 ---
 

@@ -732,7 +732,7 @@ def check_axfr(resolver, nameservers, apex):
     return rows
 
 
-def collect(host, apex, extras=True):
+def collect(host, apex, extras=True, cancel_event=None):
     rows = []
     data = {
         "a": [], "aaaa": [], "cname": [],
@@ -827,8 +827,11 @@ def collect(host, apex, extras=True):
     rows.extend(parse_ds(data["ds"]))
     rows.extend(parse_dnskey(data["dnskey"]))
     if extras:
-        rows.extend(ds_link_rows(resolver, zone))
-        rows.extend(rrsig_expiry_rows(resolver, zone))
+        if cancel_event is not None and cancel_event.is_set():
+            rows.append(("DNS extras", "Skipped (scan cancelled)"))
+        else:
+            rows.extend(ds_link_rows(resolver, zone))
+            rows.extend(rrsig_expiry_rows(resolver, zone))
     rows.extend(parse_tlsa(data["tlsa"]))
     rows.extend(parse_sshfp(data["sshfp"]))
     rows.extend(parse_srv(data["srv"]))
@@ -838,11 +841,14 @@ def collect(host, apex, extras=True):
     rows.extend(adbit_rows(apex or host))
     nameservers = data["ns_apex"] or data["ns"]
     if extras:
-        rows.extend(compare_resolvers(host, data["a"]))
-        data["doh"] = doh_compare(host, data["a"], rows)
-        rows.extend(check_axfr(resolver, nameservers, zone))
-        rows.extend(recursion_rows(resolver, nameservers))
-        rows.extend(ns_identity_rows(resolver, nameservers, zone))
+        if cancel_event is not None and cancel_event.is_set():
+            rows.append(("DNS extras", "Skipped (scan cancelled)"))
+        else:
+            rows.extend(compare_resolvers(host, data["a"]))
+            data["doh"] = doh_compare(host, data["a"], rows)
+            rows.extend(check_axfr(resolver, nameservers, zone))
+            rows.extend(recursion_rows(resolver, nameservers))
+            rows.extend(ns_identity_rows(resolver, nameservers, zone))
     else:
         rows.append(("DNS extras", "Skipped (Quick profile: resolver comparison, DoH, AXFR, NS identity)"))
     rows.extend(ns_diversity(resolver, nameservers, zone))
