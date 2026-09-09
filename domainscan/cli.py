@@ -44,7 +44,17 @@ def color_supported():
         return False
     if not hasattr(sys.stdout, "isatty"):
         return False
-    return sys.stdout.isatty()
+    if not sys.stdout.isatty():
+        return False
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+            return True
+        except Exception:
+            return False
+    return True
 
 
 USE_COLOR = color_supported()
@@ -423,6 +433,14 @@ def run_gui():
         sys.exit(1)
 
 
+def interactive_available():
+    """Check if we can read from stdin (not available in windowed EXE)."""
+    try:
+        return sys.stdin is not None and hasattr(sys.stdin, "readline")
+    except Exception:
+        return False
+
+
 def run_interactive():
     """Run an interactive CLI session where the user can type commands."""
     print_banner()
@@ -437,14 +455,18 @@ def run_interactive():
     print("  " + styled("Interactive mode", BOLD, CYAN) + "  " + muted("(type a domain to scan, 'help' for commands, 'quit' to exit)"))
     print()
 
+    prompt_label = styled("DomainScan> ", BOLD, WHITE)
+
     while True:
         try:
-            line = input(styled("  domainscan> ", BOLD, CYAN)).strip()
+            line = input(prompt_label)
         except (EOFError, KeyboardInterrupt):
-            print("\n  " + warning("Goodbye!"))
+            print()
+            print("  " + warning("Goodbye!"))
             print()
             return
 
+        line = line.strip()
         if not line:
             continue
 
@@ -668,7 +690,10 @@ def entry_point():
         return
 
     if args.target is None and not sys.argv[1:]:
-        # No arguments at all: enter interactive mode
+        # No arguments at all: enter interactive mode, or GUI if no stdin
+        if not interactive_available():
+            run_gui()
+            return
         run_interactive()
         return
 
