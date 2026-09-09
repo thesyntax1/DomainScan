@@ -85,6 +85,7 @@ class DomainScanApp:
         file_menu.add_command(label=self.t("menu_export_csv"), command=self.export_csv)
         file_menu.add_command(label=self.t("menu_export_txt"), command=self.export_txt)
         file_menu.add_command(label=self.t("menu_export_html"), command=self.export_html)
+        file_menu.add_command(label=self.t("menu_export_pdf"), command=self.export_pdf)
         file_menu.add_separator()
         file_menu.add_command(label=self.t("menu_exit"), command=self.root.destroy)
         scan_menu = tk.Menu(menubar, tearoff=0)
@@ -195,7 +196,7 @@ class DomainScanApp:
         self.ports_check.pack(side="left", padx=(14, 0))
         self.subs_check = ttk.Checkbutton(bar, text=self.t("subdomains"), variable=self.sub_var)
         self.subs_check.pack(side="left", padx=(8, 0))
-        for text, command in (("HTML", self.export_html), ("TXT", self.export_txt), ("CSV", self.export_csv), ("JSON", self.export_json)):
+        for text, command in (("PDF", self.export_pdf), ("HTML", self.export_html), ("TXT", self.export_txt), ("CSV", self.export_csv), ("JSON", self.export_json)):
             button = ttk.Button(bar, text=text, command=command)
             button.pack(side="right", padx=(0, 6))
 
@@ -918,6 +919,23 @@ class DomainScanApp:
             messagebox.showerror(self.t("export_failed_title"), str(exc))
             return
         messagebox.showinfo(self.t("export_complete_title"), self.t("export_html_saved"))
+
+    def export_pdf(self):
+        if not self.need_result():
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[(self.t("filetype_pdf"), "*.pdf")])
+        if not path:
+            return
+        try:
+            from domainscan.cli import export_pdf
+            export_pdf(path, self.result)
+        except ImportError:
+            messagebox.showerror(self.t("export_failed_title"), self.t("pdf_missing_reportlab"))
+            return
+        except Exception as exc:
+            messagebox.showerror(self.t("export_failed_title"), str(exc))
+            return
+        messagebox.showinfo(self.t("export_complete_title"), self.t("export_pdf_saved"))
 
     def show_about(self):
         messagebox.showinfo(self.t("about_title"), self.t("about_body", version=__version__))
