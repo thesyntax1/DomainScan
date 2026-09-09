@@ -188,6 +188,8 @@ class DomainScanApp:
         self.target_entry.bind("<Return>", lambda event: self.start_scan())
         self.scan_button = ttk.Button(bar, text=self.t("scan"), style="Accent.TButton", command=self.start_scan)
         self.scan_button.pack(side="left")
+        self.stop_button = ttk.Button(bar, text=self.t("stop_scan"), style="Danger.TButton", command=self.cancel_scan, state="disabled")
+        self.stop_button.pack(side="left", padx=(6, 0))
         self.clear_button = ttk.Button(bar, text=self.t("clear"), command=self.clear_all)
         self.clear_button.pack(side="left", padx=(6, 0))
         self.compare_button = ttk.Button(bar, text=self.t("compare"), command=self.compare_scan)
@@ -293,11 +295,8 @@ class DomainScanApp:
         self.about_button.configure(text=self.t("about"))
         self.lang_label.configure(text=self.t("language_label"))
         self.target_prompt.configure(text=self.t("target_label"))
-        self.scan_button.configure(text=self.t("stop_scan") if self.scanning else self.t("scan"))
-        if self.scanning:
-            self.scan_button.configure(style="Danger.TButton")
-        else:
-            self.scan_button.configure(style="Accent.TButton")
+        self.scan_button.configure(text=self.t("scan"))
+        self.stop_button.configure(text=self.t("stop_scan"))
         self.clear_button.configure(text=self.t("clear"))
         self.compare_button.configure(text=self.t("compare"))
         self.ports_check.configure(text=self.t("ports"))
@@ -360,7 +359,8 @@ class DomainScanApp:
             return
         self.scanning = True
         self.cancel_event = threading.Event()
-        self.scan_button.configure(text=self.t("stop_scan"), command=self.cancel_scan, style="Danger.TButton", state="normal")
+        self.scan_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
         self.result = None
         self.all_rows = []
         for child in self.tree.get_children():
@@ -379,11 +379,13 @@ class DomainScanApp:
             return
         if self.cancel_event is not None:
             self.cancel_event.set()
-        self.scan_button.configure(text=self.t("stopping_scan"), state="disabled")
+        self.stop_button.configure(text=self.t("stopping_scan"), state="disabled")
+        self.scan_button.configure(state="disabled")
         self.status_label.configure(text=self.t("cancelling"))
 
     def reset_scan_button(self):
-        self.scan_button.configure(text=self.t("scan"), command=self.start_scan, style="Accent.TButton", state="normal")
+        self.scan_button.configure(text=self.t("scan"), state="normal")
+        self.stop_button.configure(text=self.t("stop_scan"), state="disabled")
 
     def worker(self, target):
         def forward(percent, message):
