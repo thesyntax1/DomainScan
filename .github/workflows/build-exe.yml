@@ -32,6 +32,19 @@ jobs:
           --icon domainscan/assets/icon.ico
           --add-data "domainscan/assets;domainscan/assets"
           --collect-data tldextract
+          --hidden-import domainscan.cli
+          --hidden-import domainscan.app
+          main.py
+
+      - name: Build CLI executable
+        run: >
+          pyinstaller --noconfirm --onefile --console
+          --name DomainScan-cli
+          --icon domainscan/assets/icon.ico
+          --add-data "domainscan/assets;domainscan/assets"
+          --collect-data tldextract
+          --hidden-import domainscan.cli
+          --hidden-import domainscan.app
           main.py
 
       - name: Upload artifacts
