@@ -161,17 +161,30 @@ def now_utc():
     return moment.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def fetch_json(url, params=None, data=None, json_body=None, headers=None, timeout=10, tries=3, method="GET"):
+def proxy_dict():
+    """Return a proxy dict from environment variables if set."""
+    import os
+    proxies = {}
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        value = os.environ.get(var, "").strip()
+        if value:
+            key = "http" if "http" in var.lower() and "https" not in var.lower() else "https"
+            proxies[key] = value
+    return proxies or None
+
+
+def fetch_json(url, params=None, data=None, json_body=None, headers=None, timeout=10, tries=3, method="GET", proxies=None):
     import time
     import requests
     sane_headers = headers or {"User-Agent": BROWSER_UA}
+    proxy_map = proxies if proxies is not None else proxy_dict()
     last = RuntimeError("request failed")
     for attempt in range(max(tries, 1)):
         try:
             if method == "POST":
-                response = requests.post(url, params=params, data=data, json=json_body, headers=sane_headers, timeout=timeout)
+                response = requests.post(url, params=params, data=data, json=json_body, headers=sane_headers, timeout=timeout, proxies=proxy_map)
             else:
-                response = requests.get(url, params=params, headers=sane_headers, timeout=timeout)
+                response = requests.get(url, params=params, headers=sane_headers, timeout=timeout, proxies=proxy_map)
             response.raise_for_status()
             return response.json()
         except Exception as exc:
@@ -181,14 +194,15 @@ def fetch_json(url, params=None, data=None, json_body=None, headers=None, timeou
     raise last
 
 
-def fetch_text(url, params=None, headers=None, timeout=10, tries=3):
+def fetch_text(url, params=None, headers=None, timeout=10, tries=3, proxies=None):
     import time
     import requests
     sane_headers = headers or {"User-Agent": BROWSER_UA}
+    proxy_map = proxies if proxies is not None else proxy_dict()
     last = RuntimeError("request failed")
     for attempt in range(max(tries, 1)):
         try:
-            response = requests.get(url, params=params, headers=sane_headers, timeout=timeout)
+            response = requests.get(url, params=params, headers=sane_headers, timeout=timeout, proxies=proxy_map)
             response.raise_for_status()
             return response.text or ""
         except Exception as exc:

@@ -85,6 +85,7 @@ class DomainScanApp:
         file_menu.add_command(label=self.t("menu_export_csv"), command=self.export_csv)
         file_menu.add_command(label=self.t("menu_export_txt"), command=self.export_txt)
         file_menu.add_command(label=self.t("menu_export_html"), command=self.export_html)
+        file_menu.add_command(label=self.t("menu_export_pdf"), command=self.export_pdf)
         file_menu.add_separator()
         file_menu.add_command(label=self.t("menu_exit"), command=self.root.destroy)
         scan_menu = tk.Menu(menubar, tearoff=0)
@@ -120,6 +121,9 @@ class DomainScanApp:
         style.map("TButton", background=[("active", ACCENT_ACTIVE)], foreground=[("active", "white")])
         style.configure("Accent.TButton", background=ACCENT, foreground="white", font=("Segoe UI", 10, "bold"), padding=(18, 7))
         style.map("Accent.TButton", background=[("active", ACCENT_ACTIVE)])
+        style.configure("Danger.TButton", background="#d94545", foreground="white", font=("Segoe UI", 10, "bold"), padding=(18, 7))
+        style.map("Danger.TButton", background=[("active", "#b53030")])
+        style.configure("Disabled.TButton", background="#3a3f48", foreground="#6b7280")
         style.configure("TEntry", fieldbackground=ENTRY_BG, foreground=TEXT, bordercolor=BORDER, insertcolor=TEXT, padding=6)
         style.configure("TCheckbutton", background=BG, foreground=TEXT)
         style.configure("TCombobox", fieldbackground=ENTRY_BG, background=PANEL2, foreground=TEXT, arrowcolor=TEXT)
@@ -184,6 +188,8 @@ class DomainScanApp:
         self.target_entry.bind("<Return>", lambda event: self.start_scan())
         self.scan_button = ttk.Button(bar, text=self.t("scan"), style="Accent.TButton", command=self.start_scan)
         self.scan_button.pack(side="left")
+        self.stop_button = ttk.Button(bar, text=self.t("stop_scan"), style="Danger.TButton", command=self.cancel_scan, state="disabled")
+        self.stop_button.pack(side="left", padx=(6, 0))
         self.clear_button = ttk.Button(bar, text=self.t("clear"), command=self.clear_all)
         self.clear_button.pack(side="left", padx=(6, 0))
         self.compare_button = ttk.Button(bar, text=self.t("compare"), command=self.compare_scan)
@@ -192,7 +198,7 @@ class DomainScanApp:
         self.ports_check.pack(side="left", padx=(14, 0))
         self.subs_check = ttk.Checkbutton(bar, text=self.t("subdomains"), variable=self.sub_var)
         self.subs_check.pack(side="left", padx=(8, 0))
-        for text, command in (("HTML", self.export_html), ("TXT", self.export_txt), ("CSV", self.export_csv), ("JSON", self.export_json)):
+        for text, command in (("PDF", self.export_pdf), ("HTML", self.export_html), ("TXT", self.export_txt), ("CSV", self.export_csv), ("JSON", self.export_json)):
             button = ttk.Button(bar, text=text, command=command)
             button.pack(side="right", padx=(0, 6))
 
@@ -289,7 +295,8 @@ class DomainScanApp:
         self.about_button.configure(text=self.t("about"))
         self.lang_label.configure(text=self.t("language_label"))
         self.target_prompt.configure(text=self.t("target_label"))
-        self.scan_button.configure(text=self.t("cancel") if self.scanning else self.t("scan"))
+        self.scan_button.configure(text=self.t("scan"))
+        self.stop_button.configure(text=self.t("stop_scan"))
         self.clear_button.configure(text=self.t("clear"))
         self.compare_button.configure(text=self.t("compare"))
         self.ports_check.configure(text=self.t("ports"))
@@ -352,7 +359,8 @@ class DomainScanApp:
             return
         self.scanning = True
         self.cancel_event = threading.Event()
-        self.scan_button.configure(text=self.t("cancel"), command=self.cancel_scan, state="normal")
+        self.scan_button.configure(state="disabled")
+        self.stop_button.configure(state="normal")
         self.result = None
         self.all_rows = []
         for child in self.tree.get_children():
@@ -371,11 +379,13 @@ class DomainScanApp:
             return
         if self.cancel_event is not None:
             self.cancel_event.set()
+        self.stop_button.configure(text=self.t("stopping_scan"), state="disabled")
         self.scan_button.configure(state="disabled")
         self.status_label.configure(text=self.t("cancelling"))
 
     def reset_scan_button(self):
-        self.scan_button.configure(text=self.t("scan"), command=self.start_scan, state="normal")
+        self.scan_button.configure(text=self.t("scan"), state="normal")
+        self.stop_button.configure(text=self.t("stop_scan"), state="disabled")
 
     def worker(self, target):
         def forward(percent, message):
@@ -407,28 +417,31 @@ class DomainScanApp:
             while True:
                 message = self.queue.get_nowait()
                 kind = message[0]
-                if kind == "progress":
-                    self.progress.configure(value=message[1])
-                    self.status_label.configure(text=message[2])
-                elif kind == "done":
-                    self.finish_scan(message[1])
-                elif kind == "invalid":
-                    self.fail_scan(self.t("invalid_target", detail=message[1]))
-                elif kind == "error":
-                    self.fail_scan(self.t("scan_failed", detail=message[1]))
-                elif kind == "watch":
-                    if self.watch_log is not None:
-                        try:
-                            self.watch_log.insert(tk.END, message[1])
-                            self.watch_log.see(tk.END)
-                        except Exception:
-                            pass
-                    self.status_label.configure(text=message[1][:120])
-                elif kind == "watch_done":
-                    self.watch_stop = None
-                    self.status_label.configure(text=self.t("watch_finished"))
-                elif kind == "update":
-                    self.finish_update_check(message[1], message[2], message[3])
+                try:
+                    if kind == "progress":
+                        self.progress.configure(value=message[1])
+                        self.status_label.configure(text=message[2])
+                    elif kind == "done":
+                        self.finish_scan(message[1])
+                    elif kind == "invalid":
+                        self.fail_scan(self.t("invalid_target", detail=message[1]))
+                    elif kind == "error":
+                        self.fail_scan(self.t("scan_failed", detail=message[1]))
+                    elif kind == "watch":
+                        if self.watch_log is not None:
+                            try:
+                                self.watch_log.insert(tk.END, message[1])
+                                self.watch_log.see(tk.END)
+                            except Exception:
+                                pass
+                        self.status_label.configure(text=message[1][:120])
+                    elif kind == "watch_done":
+                        self.watch_stop = None
+                        self.status_label.configure(text=self.t("watch_finished"))
+                    elif kind == "update":
+                        self.finish_update_check(message[1], message[2], message[3])
+                except Exception:
+                    pass
         except queue.Empty:
             pass
         self.root.after(120, self.poll_queue)
@@ -783,6 +796,7 @@ class DomainScanApp:
                         js_files=0,
                         subdomain_web=0,
                         include_recon=False,
+                        cancel_event=stop_event,
                     )
                 except Exception as exc:
                     self.queue.put(("watch", self.t("round_failed", round=round_no, error=exc.__class__.__name__)))
@@ -907,6 +921,23 @@ class DomainScanApp:
             messagebox.showerror(self.t("export_failed_title"), str(exc))
             return
         messagebox.showinfo(self.t("export_complete_title"), self.t("export_html_saved"))
+
+    def export_pdf(self):
+        if not self.need_result():
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[(self.t("filetype_pdf"), "*.pdf")])
+        if not path:
+            return
+        try:
+            from domainscan.cli import export_pdf
+            export_pdf(path, self.result)
+        except ImportError:
+            messagebox.showerror(self.t("export_failed_title"), self.t("pdf_missing_reportlab"))
+            return
+        except Exception as exc:
+            messagebox.showerror(self.t("export_failed_title"), str(exc))
+            return
+        messagebox.showinfo(self.t("export_complete_title"), self.t("export_pdf_saved"))
 
     def show_about(self):
         messagebox.showinfo(self.t("about_title"), self.t("about_body", version=__version__))
