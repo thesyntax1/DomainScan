@@ -423,6 +423,237 @@ def run_gui():
         sys.exit(1)
 
 
+def run_interactive():
+    """Run an interactive CLI session where the user can type commands."""
+    print_banner()
+    profile = "standard"
+    output_path = None
+    json_output = False
+    no_ports = False
+    no_subdomains = False
+    timeout_override = None
+    proxy_url = None
+
+    print("  " + styled("Interactive mode", BOLD, CYAN) + "  " + muted("(type a domain to scan, 'help' for commands, 'quit' to exit)"))
+    print()
+
+    while True:
+        try:
+            line = input(styled("  domainscan> ", BOLD, CYAN)).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  " + warning("Goodbye!"))
+            print()
+            return
+
+        if not line:
+            continue
+
+        low = line.lower()
+
+        if low in ("quit", "exit", "q"):
+            print("  " + muted("Goodbye!"))
+            print()
+            return
+
+        if low in ("help", "h", "?"):
+            print()
+            print("  " + styled("Commands:", BOLD, CYAN))
+            print("  " + styled("  example.com", WHITE) + muted("         Scan a domain with current settings"))
+            print("  " + styled("  profile quick|standard|deep", WHITE) + muted("  Change scan profile"))
+            print("  " + styled("  ports on|off", WHITE) + muted("           Toggle port scanning"))
+            print("  " + styled("  subdomains on|off", WHITE) + muted("      Toggle subdomain discovery"))
+            print("  " + styled("  timeout <seconds>", WHITE) + muted("      Set HTTP timeout"))
+            print("  " + styled("  proxy <url>", WHITE) + muted("            Set proxy (e.g. http://127.0.0.1:8080)"))
+            print("  " + styled("  export json|html|csv|txt|pdf", WHITE) + muted("  Set export format"))
+            print("  " + styled("  json on|off", WHITE) + muted("            Toggle raw JSON output"))
+            print("  " + styled("  settings", WHITE) + muted("               Show current settings"))
+            print("  " + styled("  clear", WHITE) + muted("                  Clear the screen"))
+            print("  " + styled("  gui", WHITE) + muted("                    Launch desktop GUI"))
+            print("  " + styled("  quit", WHITE) + muted("                   Exit"))
+            print()
+            continue
+
+        if low == "clear":
+            os.system("cls" if os.name == "nt" else "clear")
+            print_banner()
+            continue
+
+        if low == "gui":
+            run_gui()
+            return
+
+        if low == "settings":
+            print()
+            print("  " + styled("Current settings:", BOLD, CYAN))
+            print("  " + info("Profile:") + "     " + profile.capitalize())
+            print("  " + info("Ports:") + "       " + (success("On") if not no_ports else muted("Off")))
+            print("  " + info("Subdomains:") + "  " + (success("On") if not no_subdomains else muted("Off")))
+            print("  " + info("Timeout:") + "     " + (str(timeout_override) + "s" if timeout_override else "default"))
+            print("  " + info("Proxy:") + "       " + (proxy_url or muted("None")))
+            print("  " + info("Export:") + "      " + (output_path or muted("None")))
+            print("  " + info("JSON mode:") + "   " + (success("On") if json_output else muted("Off")))
+            print()
+            continue
+
+        parts = line.split(None, 1)
+        cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+
+        if cmd == "profile":
+            if arg.lower() in ("quick", "standard", "deep"):
+                profile = arg.lower()
+                print("  " + info("Profile set to:") + " " + success(profile.capitalize()))
+            else:
+                print("  " + danger("Usage: profile quick|standard|deep"))
+            continue
+
+        if cmd == "ports":
+            if arg.lower() == "on":
+                no_ports = False
+                print("  " + success("Port scanning enabled"))
+            elif arg.lower() == "off":
+                no_ports = True
+                print("  " + muted("Port scanning disabled"))
+            else:
+                print("  " + danger("Usage: ports on|off"))
+            continue
+
+        if cmd == "subdomains":
+            if arg.lower() == "on":
+                no_subdomains = False
+                print("  " + success("Subdomain discovery enabled"))
+            elif arg.lower() == "off":
+                no_subdomains = True
+                print("  " + muted("Subdomain discovery disabled"))
+            else:
+                print("  " + danger("Usage: subdomains on|off"))
+            continue
+
+        if cmd == "timeout":
+            try:
+                timeout_override = int(arg)
+                print("  " + info("Timeout set to:") + " " + str(timeout_override) + "s")
+            except ValueError:
+                print("  " + danger("Usage: timeout <number>"))
+            continue
+
+        if cmd == "proxy":
+            proxy_url = arg.strip() if arg.strip() else None
+            if proxy_url:
+                print("  " + info("Proxy set to:") + " " + proxy_url)
+            else:
+                print("  " + muted("Proxy cleared"))
+            continue
+
+        if cmd == "export":
+            fmt = arg.lower().strip()
+            if fmt in ("json", "html", "csv", "txt", "pdf"):
+                output_path = "scan_result." + fmt
+                print("  " + info("Export set to:") + " " + output_path)
+            else:
+                output_path = None
+                print("  " + muted("Export cleared"))
+            continue
+
+        if cmd == "json":
+            if arg.lower() == "on":
+                json_output = True
+                print("  " + success("JSON output enabled"))
+            elif arg.lower() == "off":
+                json_output = False
+                print("  " + muted("JSON output disabled"))
+            else:
+                print("  " + danger("Usage: json on|off"))
+            continue
+
+        # Otherwise, treat it as a domain target
+        target = line.strip()
+        caps = profiles.get_profile(profile.capitalize())
+        include_ports = caps["include_ports"] and not no_ports
+        include_subdomains = caps["include_subdomains"] and not no_subdomains
+        timeout = timeout_override or caps["timeout"]
+
+        if proxy_url:
+            apply_proxy(proxy_url)
+
+        print()
+        print("  " + info("Target:") + "      " + target)
+        print("  " + info("Profile:") + "     " + profile.capitalize())
+        print("  " + info("Ports:") + "       " + (success("Yes") if include_ports else muted("No")))
+        print("  " + info("Subdomains:") + "  " + (success("Yes") if include_subdomains else muted("No")))
+        print("  " + info("Timeout:") + "     " + str(timeout) + "s")
+        if output_path:
+            print("  " + info("Export:") + "      " + output_path)
+        print()
+
+        progress = ProgressPrinter(quiet=json_output)
+        cancel_event = threading.Event()
+
+        def signal_handler(sig, frame):
+            if not cancel_event.is_set():
+                cancel_event.set()
+                print("\n  " + warning("Cancelling scan..."))
+
+        try:
+            import signal
+            signal.signal(signal.SIGINT, signal_handler)
+        except Exception:
+            pass
+
+        result = None
+        error = None
+
+        try:
+            result = scanner.run_scan(
+                target,
+                on_progress=progress,
+                include_ports=include_ports,
+                include_subdomains=include_subdomains,
+                timeout=timeout,
+                crawl_pages=caps["crawl_pages"],
+                js_files=caps["js_files"],
+                subdomain_web=caps["subdomain_web"],
+                include_recon=caps["include_recon"],
+                cancel_event=cancel_event,
+            )
+        except ValueError as exc:
+            error = "Invalid target: " + str(exc)
+        except KeyboardInterrupt:
+            cancel_event.set()
+            if not result:
+                error = "Scan interrupted."
+        except Exception as exc:
+            error = exc.__class__.__name__ + ": " + str(exc)
+
+        if error:
+            print("\n  " + danger("Error: ") + error)
+            print()
+            continue
+
+        cancelled = bool(result["meta"].get("cancelled"))
+
+        if json_output:
+            json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+            sys.stdout.write("\n")
+        else:
+            print_results(result, quiet=False)
+
+        if output_path:
+            try:
+                fmt = export_result(result, output_path)
+                print("  " + success("Exported:") + " " + output_path + " (" + fmt + ")")
+            except Exception as exc:
+                print("  " + danger("Export failed: ") + str(exc))
+
+        if not output_path and not json_output and not cancelled:
+            host = result["target"]["host"]
+            duration = result["meta"]["duration_seconds"]
+            findings = result["meta"]["findings"]
+            print("  " + styled("─" * 68, DIM))
+            print("  " + muted("Scan completed: " + host + " | " + str(duration) + "s | " + str(findings) + " findings"))
+            print()
+
+
 def entry_point():
     """Main entry point for the domainscan command."""
     parser = build_parser()
@@ -436,10 +667,16 @@ def entry_point():
         run_gui()
         return
 
+    if args.target is None and not sys.argv[1:]:
+        # No arguments at all: enter interactive mode
+        run_interactive()
+        return
+
     if args.target is None:
+        # Has flags but no target (e.g. --help was handled by argparse already)
         parser.print_help()
         print()
-        print("  " + muted("Tip: run ") + styled("domainscan --gui", CYAN) + muted(" to launch the desktop application."))
+        print("  " + muted("Tip: run ") + styled("domainscan", CYAN) + muted(" with no arguments for interactive mode."))
         sys.exit(0)
 
     run_cli(args)

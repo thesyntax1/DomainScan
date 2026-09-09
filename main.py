@@ -5,8 +5,9 @@ about a domain or website. It provides both a desktop GUI and a
 command-line interface.
 
 Usage:
-    python main.py                    Launch the desktop GUI
-    python main.py example.com        CLI scan of example.com
+    python main.py                    Interactive CLI (type domains to scan)
+    python main.py example.com        One-shot CLI scan
+    python main.py --gui              Launch the desktop GUI
     python main.py --help             Show help
 """
 
@@ -15,7 +16,7 @@ import sys
 
 def main():
     """Route to CLI or GUI based on arguments."""
-    if len(sys.argv) <= 1:
+    if len(sys.argv) > 1 and sys.argv[1] == "--gui":
         from domainscan.app import main as gui_main
         gui_main()
     else:
