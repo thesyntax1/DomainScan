@@ -4,7 +4,8 @@
 
 # DomainScan
 
-**Legal, fast, offline-friendly website &amp; domain intelligence — in one desktop window.**
+**Legal, fast, offline-friendly website &amp; d<img width="1365" height="730" alt="image1" src="https://github.com/user-attachments/assets/0c626e05-e8b5-4522-8247-3c0d84bda708" />
+omain intelligence — in one desktop window.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
