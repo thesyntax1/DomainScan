@@ -7,3 +7,4 @@ report.txt
 build/
 dist/
 *.spec
+*.egg-info/

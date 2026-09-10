@@ -1,24 +1,30 @@
 <div align="center">
 
-<img src="domainscan/assets/logo.png" alt="DomainScan logo" width="128" height="128">
+<img src="domainscan/assets/logo.png" alt="DomainScan logo" width="420">
 
 # DomainScan
 
-**Legal, fast, offline-friendly website &amp; d<img width="1365" height="730" alt="image1" src="https://github.com/user-attachments/assets/0c626e05-e8b5-4522-8247-3c0d84bda708" />
-omain intelligence — in one desktop window.**
+**Legal, fast, offline-friendly website & domain intelligence — in one desktop window.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.10.0-2f7cf6)]()
+[![Version](https://img.shields.io/badge/Version-1.11.0-2f7cf6)]()
 [![Tests](https://img.shields.io/badge/Tests-271%20passing-success)]()
 
 </div>
 
-DomainScan is a desktop tool that collects **publicly available information** about a domain or website and presents it in one window. Enter a domain, run the scan, browse the findings, export a report. It is built to be honest about what it finds: anything that cannot be resolved is reported as *missing*, never guessed or fabricated.
+DomainScan is a desktop tool that collects **publicly available information** about a domain or website and presents it all in one window. Enter a domain, run the scan, browse the findings, export a report. It is built to be honest about what it finds: anything that cannot be resolved is reported as *missing*, never guessed or fabricated.
 
----
-<img width="1365" height="709" alt="image2" src="https://github.com/user-attachments/assets/9f960ca8-1fb0-4702-9bff-bcdd2cfa3a51" />
+## 📸 Screenshots
+
+<p align="center">
+  <img src="assets/image1.png" alt="DomainScan main window" width="640">
+</p>
+
+<p align="center">
+  <img src="assets/image2.png" alt="DomainScan scan results" width="640">
+</p>
 
 ## ✨ Highlights
 
@@ -27,9 +33,21 @@ DomainScan is a desktop tool that collects **publicly available information** ab
 - ⏹️ **Cancellable scans** — stop a running scan with one click.
 - 🔄 **Update checks** — a Help menu item (and an optional startup check) tells you when a new release is out.
 - 🌍 **Multilingual UI** — English, Türkçe, Español, Deutsch (switched live from the header).
-- 📤 **Export** to JSON, CSV, TXT or styled HTML.
+- 📤 **Export** to JSON, CSV, TXT, styled HTML or PDF.
+- 💻 **GUI + CLI** — a polished desktop window and a full command-line interface.
 - 🧪 **Fully offline test suite** (271 tests, no network needed) plus a real-GUI smoke test in CI.
 - 🛡️ **Ethical by design** — passive/light checks only, plus a prominent authorization reminder.
+
+## 🚀 Quick start
+
+```bash
+git clone https://github.com/thesyntax1/DomainScan.git
+cd DomainScan
+pip install -r requirements.txt
+python main.py
+```
+
+Type a domain or URL (for example `example.com`) and press **Scan**. That's it — no API keys, no sign-up, no configuration required.
 
 ## What it collects
 
@@ -72,7 +90,7 @@ A typical scan returns several hundred findings. Anything that cannot be resolve
 
 | Profile  | What it runs |
 | -------- | ------------ |
-| **Quick** | Core DNS records, WHOIS/RDAP, IP &amp; geolocation, website headers, basic TLS certificate, site files, DNS-based mail auth (SPF/DMARC/DKIM), content/SEO/accessibility/performance/privacy audits, cross-checks and the security grade. Skips ports, subdomains, crawling, JS analysis, BGP, blocklists, certificate history, typosquat, threat feeds, web archive and the slow deep probes (openssl chain/OCSP/cipher enumeration, SMTP probing, DNS resolver comparison/AXFR/NS identity). |
+| **Quick** | Core DNS records, WHOIS/RDAP, IP & geolocation, website headers, basic TLS certificate, site files, DNS-based mail auth (SPF/DMARC/DKIM), content/SEO/accessibility/performance/privacy audits, cross-checks and the security grade. Skips ports, subdomains, crawling, JS analysis, BGP, blocklists, certificate history, typosquat, threat feeds, web archive and the slow deep probes (openssl chain/OCSP/cipher enumeration, SMTP probing, DNS resolver comparison/AXFR/NS identity). |
 | **Standard** | Everything in Quick plus ports, subdomains, crawling (15 pages), JS analysis (6 files), subdomain web probing and all recon/deep sections. |
 | **Deep** | Standard with raised limits: 40 crawl pages, 12 JS files, 40 subdomain web probes. |
 
@@ -99,13 +117,27 @@ Type a domain or URL (for example `example.com`) and press **Scan**. While a sca
 
 Every scan is saved under `~/.domainscan/history/` (older runs are pruned to the latest 20) and can be compared with earlier scans from the Scan menu.
 
+### Command line
+
+DomainScan also ships a full CLI:
+
+```bash
+python main.py example.com                 # one-shot scan (interactive output)
+python main.py example.com --profile deep  # use the Deep profile
+python main.py example.com --json          # print JSON to stdout
+python main.py example.com -o report.html  # save a report (json/csv/txt/html/pdf)
+python main.py --gui                       # launch the desktop GUI
+```
+
+PDF export needs the optional `reportlab` dependency (`pip install ".[pdf]"`).
+
 ## Windows executable
 
 No Python needed: download `DomainScan.exe` from the [Releases](https://github.com/thesyntax1/DomainScan/releases) page. Every `v*` tag is built automatically with PyInstaller on GitHub Actions and attached to its release. The binary is unsigned, so Windows SmartScreen may ask for confirmation on first run.
 
 ## Export
 
-Reports can be saved as JSON, CSV, plain text or styled HTML from the buttons above the results.
+Reports can be saved as JSON, CSV, plain text, styled HTML or PDF from the buttons above the results (and from the CLI with `-o`).
 
 ## Tests
 
@@ -117,7 +149,7 @@ The suite (271 tests) runs fully offline using a local HTTP server, a local TLS 
 
 ---
 
-## ⚖️ Legal &amp; ethical note — please read
+## ⚖️ Legal & ethical note — please read
 
 DomainScan only reads **publicly available data** and performs **light, non-intrusive checks**. It never sends mail content, never uploads payloads, never exploits a vulnerability, and never attempts to access anything that is not already exposed over the public network.
 
@@ -148,3 +180,16 @@ MIT — see [LICENSE](LICENSE).
 ## 🙏 Acknowledgments
 
 DomainScan builds on [requests](https://github.com/psf/requests), [dnspython](https://www.dnspython.org/), [Beautiful Soup](https://www.crummy.com/software/BeautifulSoup/) and [tldextract](https://github.com/john-kurkowski/tldextract), and queries many free public data sources (IANA RDAP, crt.sh, urlscan.io, abuse.ch, BGPView, PeeringDB, ip-api.com, ipwho.is, Cloudflare DoH, the Internet Archive and more).
+
+---
+
+## ⭐ Support the project
+
+If DomainScan saves you time or helps you understand a domain, please consider giving the repository a **⭐ star**. It takes a second, costs nothing, and helps others discover the project — it really means a lot! 🙏
+
+## 📬 Contact
+
+Questions, feedback or ideas? Reach out — I'd love to hear from you:
+
+- **TikTok** — [@szoboszlai2113](https://www.tiktok.com/@szoboszlai2113)
+- **E-mail** — [user2102392109@proton.me](mailto:user2102392109@proton.me)

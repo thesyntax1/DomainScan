@@ -4,6 +4,40 @@ All notable changes to DomainScan are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] - 2026-09-11
+
+### Added
+
+- **Command-line interface restored**: a full CLI behind the `domainscan`
+  console script and the `DomainScan-cli.exe` build — interactive mode,
+  one-shot scans, `--profile`, `--json`, `--proxy`, `--timeout`, `--no-ports`,
+  `--no-subdomains`, `--quiet`, `--no-color`, and report export to JSON / HTML /
+  CSV / TXT / PDF via `-o`.
+- **PDF report export** through the optional `reportlab` dependency
+  (`pip install "domainscan[pdf]"`).
+- README overhaul: fixed broken markup in the tagline, switched screenshots to
+  the bundled local images, corrected the version badge, documented the CLI and
+  Windows executable, and added "Support the project" and "Contact" sections.
+
+### Changed
+
+- Project description and version metadata aligned with 1.11.0.
+
+### Fixed
+
+- **Build backend**: `setuptools.backends._legacy:_Backend` was removed in
+  modern setuptools, so the package could not be built at all. Switched to the
+  standard `setuptools.build_meta` backend and raised the minimum to
+  `setuptools>=77.0`.
+- **License metadata**: replaced the deprecated `license = {text = "MIT"}` with
+  the PEP 639 `license = "MIT"` expression and dropped the now-superseded
+  `License :: OSI Approved :: MIT License` classifier.
+
+### Removed
+
+- `Pillow` from `requirements.txt` (unused — image handling relies on tkinter
+  and reportlab only).
+
 ## [1.10.0] - 2026-09-08
 
 ### Added
