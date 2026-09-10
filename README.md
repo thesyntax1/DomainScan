@@ -17,6 +17,7 @@
 DomainScan is a desktop tool that collects **publicly available information** about a domain or website and presents it in one window. Enter a domain, run the scan, browse the findings, export a report. It is built to be honest about what it finds: anything that cannot be resolved is reported as *missing*, never guessed or fabricated.
 
 ---
+<img width="1365" height="709" alt="image2" src="https://github.com/user-attachments/assets/9f960ca8-1fb0-4702-9bff-bcdd2cfa3a51" />
 
 ## ✨ Highlights
 
