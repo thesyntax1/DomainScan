@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "domainscan"
+version = "1.11.0"
+description = "Legal website and domain intelligence tool"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    {name = "thesyntax1"},
+]
+keywords = ["security", "dns", "domain", "scanner", "whois", "subdomain", "ssl", "tls"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Internet",
+    "Topic :: Internet :: Name Service (DNS)",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "requests>=2.31.0",
+    "dnspython>=2.4.0",
+    "beautifulsoup4>=4.12.0",
+    "tldextract>=5.0.0",
+]
+
+[project.optional-dependencies]
+pdf = ["reportlab>=4.0"]
+
+[project.scripts]
+domainscan = "domainscan.cli:entry_point"
+
+[project.gui-scripts]
+domainscan-gui = "domainscan.app:main"
+
+[project.urls]
+Homepage = "https://github.com/thesyntax1/DomainScan"
+Issues = "https://github.com/thesyntax1/DomainScan/issues"
+Changelog = "https://github.com/thesyntax1/DomainScan/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+include = ["domainscan*"]
+
+[tool.setuptools.package-data]
+"domainscan.assets" = ["*.png", "*.ico"]
